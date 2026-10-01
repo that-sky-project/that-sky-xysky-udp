@@ -36,7 +36,7 @@ XYSky ──HTTP(S) /allocate──▶ QWD ──WebSocket──▶ XYSKY UDP No
 ```
 
 此模式下，XYSky 的 `udp.uri` 是 QWD 的 **HTTP(S) `/allocate`** 地址，而节点的 `qwd.url` 是
-QWD 的 **WebSocket** 地址——两者是不同的端点。配套的管理器项目见 `qwd/`（[README](../qwd/README_zh.md)）。
+QWD 的 **WebSocket** 地址——两者是不同的端点。配套的管理器项目见 `qwd/`（[README](https://github.com/that-sky-project/that-sky-xysky-udp-room-authority/README_zh.md)）。
 
 ## 环境要求
 
