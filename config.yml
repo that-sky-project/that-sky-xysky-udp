@@ -13,11 +13,19 @@ room:
   tick_rate: 10
   max_packet_bytes: 16384
   bad_packet_limit: 8
+  # Revert a session stuck in MOVING back to ACTIVE if the client neither
+  # completes the move nor disconnects within this window (ms).
+  move_timeout_ms: 20000
   move_targets: []
 
 http:
   host: 0.0.0.0
   port: 19133
 
+# Room Authority / Room Manager (QWD) link.
+# Leave url empty to run this node standalone as a single 8-player room:
+# it will NOT connect to or register with any manager.
+# Fill in the QWD WebSocket address (e.g. wss://your-qwd-host) to enable
+# manager-coordinated room allocation and cross-room moves.
 qwd:
-  url: wss://thatroom.thatskyproject.cc
+  url: ""

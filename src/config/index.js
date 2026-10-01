@@ -24,10 +24,12 @@ const configSchema = z.object({
     tick_rate: numberFrom(10),
     max_packet_bytes: numberFrom(16384),
     bad_packet_limit: numberFrom(8),
+    move_timeout_ms: numberFrom(20000),
     move_targets: z.array(z.record(z.unknown())).default([])
   }).default({}),
   http: z.object({ host: z.string().default('0.0.0.0'), port: numberFrom(19132) }).default({}),
-  qwd: z.object({ url: z.string().trim().min(1).default('wss://thatroom.xyqaq.cn') }).default({})
+  // Empty url => standalone node, no manager connection. See config.yml.
+  qwd: z.object({ url: z.string().trim().default('') }).default({})
 });
 
 export function loadConfig(configFile = path.resolve(process.cwd(), 'config.yml')) {
@@ -53,6 +55,7 @@ export function loadConfig(configFile = path.resolve(process.cwd(), 'config.yml'
       tickRate: parsed.room.tick_rate,
       maxPacketBytes: parsed.room.max_packet_bytes,
       badPacketLimit: parsed.room.bad_packet_limit,
+      moveTimeoutMs: parsed.room.move_timeout_ms,
       moveTargets: parsed.room.move_targets,
       qwdUrl: parsed.qwd.url
     },

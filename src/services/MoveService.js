@@ -2,7 +2,7 @@ import { PacketIds } from '../protocol/PacketIds.js';
 import { ConnectionState } from '../session/ConnectionSession.js';
 
 export class MoveService {
-  constructor({ players, rooms, broadcaster, transport, levelService, logger, onMoveResult }) {
+  constructor({ players, rooms, broadcaster, transport, levelService, logger, onMoveResult, moveTimeoutMs = 20000 }) {
     this.players = players;
     this.rooms = rooms;
     this.broadcaster = broadcaster;
@@ -10,6 +10,7 @@ export class MoveService {
     this.levelService = levelService;
     this.logger = logger;
     this.onMoveResult = onMoveResult;
+    this.moveTimeoutMs = moveTimeoutMs;
     this.pendingMoves = new Map();
     this.moveHistory = new Map();
   }
@@ -235,8 +236,26 @@ export class MoveService {
     }, 'received move result');
   }
 
-  forgetPlayerMoves(player, reason = 'player_disconnected') {
-    if (!player) return 0;
+  expireStuckMoves(now = Date.now()) {
+    let expired = 0;
+    for (const move of [...this.pendingMoves.values()]) {
+      if (move.status !== 'pending' || now - move.createdAt < this.moveTimeoutMs) continue;
+      const player = this.players.list().find(item => item.id === move.playerId);
+      if (player) {
+        // Client neither completed the move nor disconnected in time. Revert it
+        // to ACTIVE so the slot and authority are reclaimed instead of leaking.
+        this.cancelPlayerMove(player, 2);
+        this.logger.warn({ moveId: move.moveId, playerId: move.playerId }, 'move timed out; reverted session to active');
+      } else {
+        this.pendingMoves.delete(move.moveId);
+        this.moveHistory.set(move.moveId, { ...move, status: 'aborted', abortReason: 'move_timeout', abortedAt: now });
+      }
+      expired += 1;
+    }
+    return expired;
+  }
+
+  forgetPlayerMoves(player, reason = 'player_disconnected') {    if (!player) return 0;
     let removed = 0;
     for (const [moveId, move] of this.pendingMoves.entries()) {
       if (move.playerId !== player.id) continue;

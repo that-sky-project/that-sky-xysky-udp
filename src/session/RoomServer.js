@@ -88,6 +88,7 @@ export class RoomServer {
       transport: this.transport,
       levelService: this.levelService,
       logger,
+      moveTimeoutMs: config.moveTimeoutMs,
       onMoveResult: (move, accepted) => {
         if (!move.transactionId) return;
         this.qwd.publish('move.result', {
@@ -299,6 +300,7 @@ export class RoomServer {
 
   onTick() {
     this.expireMigrationRosters();
+    this.moveService.expireStuckMoves();
     this.metrics.connectedPeers.set(this.sessions.size);
     this.metrics.onlinePlayers.set(this.players.size);
     this.gameMessageService.syncPlayerStates();
