@@ -42,7 +42,7 @@ XYSky ──HTTP(S) /allocate──▶ QWD ──WebSocket──▶ XYSKY UDP No
 
 In this mode XYSky's `udp.uri` is the QWD **HTTP(S) `/allocate`** address, while the node's
 `qwd.url` is the QWD **WebSocket** address — two different endpoints. See the companion
-manager project under `qwd/` ([README](../qwd/README.md)).
+manager project under `qwd/` ([README](https://github.com/that-sky-project/that-sky-xysky-udp-room-authority/README.md)).
 
 ## Requirements
 
