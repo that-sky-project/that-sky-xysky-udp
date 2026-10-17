@@ -121,85 +121,90 @@ function playerState(io, v = {}) {
   o.position = io.vec(v.position);
   o.net = netState(io, v.net);
   o.moveHeader = moveHeader(io, v.moveHeader);
-  // o.offset_52bf = io.u8(v.offset_52bf);
-  // o.offset_52b0 = io.u16(v.offset_52b0);
-  // o.offset_519c = io.u32(v.offset_519c);
-  // o.move = io.scoped('move', () => moveState(io, v.move));
-  // const bodyCount = io.bounded(v.body?.length ?? v.bodyCount, 0, 4);
-  // o.body = Array.from({ length: bodyCount }, (_, i) => io.scoped(`body[${i}]`, () => bodyKeyFrame(
-  //   io, v.body?.[i], o.position, o.move.rotation0[0]
-  // )));
-  // o.queuedState = io.scoped('queuedState', () => queuedState(io, v.queuedState));
-  // o.offset_5b54 = io.bounded(v.offset_5b54, 0, 3);
-  // o.offset_5b30 = io.u32(v.offset_5b30);
-  // o.offset_5a00 = io.vec(v.offset_5a00);
-  // o.action = io.scoped('action', () => actionState(io, v.action));
-  // o.energy = io.scoped('energy', () => energyState(io, v.energy));
-  // o.offset_5a10 = io.vec(v.offset_5a10);
-  // // suspected: look/facing direction; exact wire range is [-1, 1], pivot 0.
-  // o.offset_5a20 = io.qv(v.offset_5a20, -1, 1, 0, 5);
-  // o.anim = io.scoped('anim', () => animState(io, v.anim));
-  // o.flags_5b87 = boolArray(io, v.flags_5b87, 4);
-  // o.offset_5b10 = io.u8(v.offset_5b10);
-  // o.offset_5aa4 = io.qf(v.offset_5aa4, 0, 1, 0, 4);
-  // o.offset_5aac = io.f32(v.offset_5aac);
-  // o.offset_52c8 = io.u8(v.offset_52c8);
-  // o.offset_5b96 = io.bool(v.offset_5b96);
-  // o.offset_52cc = io.bounded(v.offset_52cc, 0, 3);
-  // o.offset_52cd = io.bounded(v.offset_52cd, 0, 3);
-  // o.hasLookTarget = io.bool(v.hasLookTarget);
-  // if (o.hasLookTarget) { o.lookTargetPlayerId = io.u8(v.lookTargetPlayerId); o.lookTarget = io.vec(v.lookTarget); }
-  // o.offset_5198 = io.qf(v.offset_5198, 0, 50, 0, 8);
-  // o.offset_52b4 = io.bounded(v.offset_52b4, -1, 32);
-  // o.offset_52b8 = io.u16(v.offset_52b8);
-  // // suspected: movement state bytes. These are raw u8, not packed bools.
-  // o.bytes_52c0_52c2 = [io.u8(v.bytes_52c0_52c2?.[0]), io.u8(v.bytes_52c0_52c2?.[1])];
-  // o.offset_52ba = io.bounded(v.offset_52ba, 0, 0x2a3);
-  // o.offset_52bc = io.bounded(v.offset_52bc, 0, 0x2a3);
-  // o.offset_52c1 = io.u8(v.offset_52c1);
-  // o.offset_52be = io.bounded(v.offset_52be, 0, 0x11);
-  // o.flags_52c3 = boolArray(io, v.flags_52c3, 4);
-  // o.offset_5b53 = io.bounded(v.offset_5b53, 0, 0xd);
-  // o.offset_5b18 = io.u8(v.offset_5b18);
-  // o.offset_5ba5 = io.u8(v.offset_5ba5);
-  // o.offset_5b44 = io.bounded(v.offset_5b44, -1, 0x10);
-  // o.offset_5b48 = io.bounded(v.offset_5b48, -1, 8);
-  // o.offset_5b8e = io.bool(v.offset_5b8e);
-  // o.offset_5890 = io.bool(v.offset_5890);
-  // o.poseVectors = Array.from({ length: 6 }, (_, i) => io.vec(v.poseVectors?.[i]));
-  // o.offset_5904 = io.u8(v.offset_5904);
-  // o.offset_5b8f = io.bool(v.offset_5b8f);
-  // o.offset_5b6e = io.u8(v.offset_5b6e);
-  // o.offset_5b5c = io.bounded(v.offset_5b5c, 0, 2);
-  // o.offset_5b5d = io.bounded(v.offset_5b5d, 0, 2);
-  // o.outfit = io.scoped('outfit', () => outfitState(io, v.outfit));
-  // o.offset_5b5e = io.u8(v.offset_5b5e);
-  // o.offset_5b40 = io.u32(v.offset_5b40 ?? 1);
-  // o.offset_5b52 = io.bounded(v.offset_5b52, 0, 0xff);
-  // o.offset_5b2c = io.u8(v.offset_5b2c);
-  // const idCount = io.bounded(v.ids?.length ?? v.idCount, 0, 5, 'idCount/offset_5b5f');
-  // o.ids = Array.from({ length: idCount }, (_, i) => io.u64(v.ids?.[i]));
-  // o.offset_5b4c = io.u32(v.offset_5b4c);
-  // o.offset_5b50 = io.u16(v.offset_5b50);
-  // o.offset_5b1c = io.u8(v.offset_5b1c);
-  // o.offset_5b90 = io.bool(v.offset_5b90);
-  // o.offset_5ab0 = io.qf(v.offset_5ab0, 0, 1, 0, 4);
-  // const playerCount = io.bounded(v.players?.length ?? v.playerCount, 0, 7);
-  // o.players = Array.from({ length: playerCount }, (_, i) => io.u8(v.players?.[i]));
-  // o.social = io.scoped('social', () => socialState(io, v.social));
-  // o.worldQuests = io.scoped('worldQuests', () => worldQuestState(io, v.worldQuests));
-  // o.offset_5b97 = io.bool(v.offset_5b97);
-  // o.offset_5b66 = io.u16(v.offset_5b66); o.offset_5b68 = io.u16(v.offset_5b68);
-  // o.offset_5b6a = io.u16(v.offset_5b6a); o.offset_5b6c = io.u16(v.offset_5b6c);
-  // o.offset_52c5 = io.bool(v.offset_52c5);
-  // o.tail = io.scoped('tail', () => tailState(io, v.tail, o.position));
-  // o.offset_b4 = io.u32(v.offset_b4);
-  // o.offset_54 = io.bytes(v.offset_54, 16); o.offset_64 = io.u32(v.offset_64);
-  // o.offset_68 = io.bytes(v.offset_68, 16); o.offset_78 = io.u8(v.offset_78);
-  // o.offset_88 = io.u64(v.offset_88); o.offset_80 = io.u32(v.offset_80);
-  // o.flags_90 = boolArray(io, v.flags_90, 4); o.offset_a0 = io.vec(v.offset_a0);
-  // o.flags_b8 = boolArray(io, v.flags_b8, 4); o.offset_5178 = io.bytes(v.offset_5178, 32);
-  // o.finalFlags = Array.from({ length: 10 }, (_, i) => io.u8(v.finalFlags?.[i]));
+  o.offset_52bf = io.u8(v.offset_52bf);
+  o.offset_52b0 = io.u16(v.offset_52b0);
+  o.offset_519c = io.u32(v.offset_519c);
+  o.move = io.scoped('move', () => moveState(io, v.move));
+  const bodyCount = io.bounded(v.body?.length ?? v.bodyCount, 0, 4);
+  o.body = Array.from({ length: bodyCount }, (_, i) => io.scoped(`body[${i}]`, () => bodyKeyFrame(
+    io, v.body?.[i], o.position, o.move.rotation0[0]
+  )));
+  o.queuedState = io.scoped('queuedState', () => queuedState(io, v.queuedState));
+  o.offset_5b54 = io.bounded(v.offset_5b54, 0, 3);
+  o.offset_5b30 = io.u32(v.offset_5b30);
+  o.offset_5a00 = io.vec(v.offset_5a00);
+  o.action = io.scoped('action', () => actionState(io, v.action));
+  o.energy = io.scoped('energy', () => energyState(io, v.energy));
+  o.offset_5a10 = io.vec(v.offset_5a10);
+  // suspected: look/facing direction; exact wire range is [-1, 1], pivot 0.
+  o.offset_5a20 = io.qv(v.offset_5a20, -1, 1, 0, 5);
+  o.anim = io.scoped('anim', () => animState(io, v.anim));
+  o.flags_5b87 = boolArray(io, v.flags_5b87, 4);
+  o.offset_5b10 = io.u8(v.offset_5b10);
+  o.offset_5aa4 = io.qf(v.offset_5aa4, 0, 1, 0, 4);
+  o.offset_5aac = io.f32(v.offset_5aac);
+  o.offset_52c8 = io.u8(v.offset_52c8);
+  o.offset_5b96 = io.bool(v.offset_5b96);
+  o.offset_52cc = io.bounded(v.offset_52cc, 0, 3);
+  o.offset_52cd = io.bounded(v.offset_52cd, 0, 3);
+  o.hasLookTarget = io.bool(v.hasLookTarget);
+  if (o.hasLookTarget) { o.lookTargetPlayerId = io.u8(v.lookTargetPlayerId); o.lookTarget = io.vec(v.lookTarget); }
+  o.offset_5198 = io.qf(v.offset_5198, 0, 50, 0, 8);
+  o.offset_52b4 = io.bounded(v.offset_52b4, -1, 32);
+  o.offset_52b8 = io.u16(v.offset_52b8);
+  // suspected: movement state bytes. These are raw u8, not packed bools.
+  o.bytes_52c0_52c2 = [io.u8(v.bytes_52c0_52c2?.[0]), io.u8(v.bytes_52c0_52c2?.[1])];
+  o.offset_52ba = io.bounded(v.offset_52ba, 0, 0x2a3);
+  o.offset_52bc = io.bounded(v.offset_52bc, 0, 0x2a3);
+  o.offset_52c1 = io.u8(v.offset_52c1);
+  o.offset_52be = io.bounded(v.offset_52be, 0, 0x11);
+  o.flags_52c3 = boolArray(io, v.flags_52c3, 4);
+  o.offset_5b53 = io.bounded(v.offset_5b53, 0, 0xd);
+  o.offset_5b18 = io.u8(v.offset_5b18);
+  o.offset_5ba5 = io.u8(v.offset_5ba5);
+  o.offset_5b44 = io.bounded(v.offset_5b44, -1, 0x10);
+  o.offset_5b48 = io.bounded(v.offset_5b48, -1, 8);
+  o.offset_5b8e = io.bool(v.offset_5b8e);
+  o.offset_5890 = io.bool(v.offset_5890);
+  o.poseVectors = Array.from({ length: 6 }, (_, i) => io.vec(v.poseVectors?.[i]));
+  o.offset_5904 = io.u8(v.offset_5904);
+  o.offset_5b8f = io.bool(v.offset_5b8f);
+  o.offset_5b6e = io.u8(v.offset_5b6e);
+  o.offset_5b5c = io.bounded(v.offset_5b5c, 0, 2);
+  o.offset_5b5d = io.bounded(v.offset_5b5d, 0, 2);
+  o.outfit = io.scoped('outfit', () => outfitState(io, v.outfit));
+  o.offset_5b5e = io.u8(v.offset_5b5e);
+  o.offset_5b40 = io.u32(v.offset_5b40 ?? 1);
+  o.offset_5b52 = io.bounded(v.offset_5b52, 0, 0xff);
+  o.offset_5b2c = io.u8(v.offset_5b2c);
+  const idCount = io.bounded(v.ids?.length ?? v.idCount, 0, 5, 'idCount/offset_5b5f');
+  o.ids = Array.from({ length: idCount }, (_, i) => {
+    const item = v.ids?.[i];
+    const id = io.u64(typeof item === 'object' && item !== null ? item.id : item);
+    const flags = io.u8(typeof item === 'object' && item !== null ? item.flags : v.idFlags?.[i]);
+    return { id, flags };
+  });
+  o.offset_5b4c = io.u32(v.offset_5b4c);
+  o.offset_5b50 = io.u16(v.offset_5b50);
+  o.offset_5b1c = io.u8(v.offset_5b1c);
+  o.offset_5b90 = io.bool(v.offset_5b90);
+  o.offset_5ab0 = io.qf(v.offset_5ab0, 0, 1, 0, 4);
+  const playerCount = io.bounded(v.players?.length ?? v.playerCount, 0, 7);
+  o.players = Array.from({ length: playerCount }, (_, i) => io.u8(v.players?.[i]));
+  o.social = io.scoped('social', () => socialState(io, v.social));
+  o.worldQuests = io.scoped('worldQuests', () => worldQuestState(io, v.worldQuests));
+  o.offset_5b97 = io.bool(v.offset_5b97);
+  o.offset_5b66 = io.u16(v.offset_5b66); o.offset_5b68 = io.u16(v.offset_5b68);
+  o.offset_5b6a = io.u16(v.offset_5b6a); o.offset_5b6c = io.u16(v.offset_5b6c);
+  o.offset_52c5 = io.bool(v.offset_52c5);
+  o.tail = io.scoped('tail', () => tailState(io, v.tail, o.position));
+  o.offset_b4 = io.u32(v.offset_b4);
+  o.offset_54 = io.bytes(v.offset_54, 16); o.offset_64 = io.u32(v.offset_64);
+  o.offset_68 = io.bytes(v.offset_68, 16); o.offset_78 = io.u8(v.offset_78);
+  o.offset_88 = io.u64(v.offset_88); o.offset_80 = io.u32(v.offset_80);
+  o.flags_90 = boolArray(io, v.flags_90, 4); o.offset_a0 = io.vec(v.offset_a0);
+  o.flags_b8 = boolArray(io, v.flags_b8, 4); o.offset_5178 = io.bytes(v.offset_5178, 32);
+  o.finalFlags = Array.from({ length: 10 }, (_, i) => io.u8(v.finalFlags?.[i]));
   return o;
 }
 
@@ -231,7 +236,7 @@ function moveState(io, v = {}) { return {
 function bodyKeyFrame(io, v = {}, base = [0, 0, 0], anglePivot = 0) {
   const time = io.qf(v.time, 0, 3, 0, 12);
   const weights = Array.from({ length: 6 }, (_, i) => io.qf(v.weights?.[i], 0, 1, 0, 3));
-  const position = add3(base, io.qv(sub3(v.position, base), -25, 20, 0, 12));
+  const position = add3(base, io.qv(sub3(v.position, base), -20, 20, 0, 12));
   return { time, weights,
     position, normal: io.qv(v.normal, -1, 1, 0, 6), tangent: io.qv(v.tangent, -1, 1, 0, 8),
     point0: add3(position, io.qv(sub3(v.point0, position), -4, 4, 0, 8)),
@@ -252,7 +257,7 @@ function queuedState(io, v = {}) {
   o.offset_2ec = io.bounded(v.offset_2ec, 0, 8); return o;
 }
 
-function actionState(io, v = {}) { return { playerId: io.u8(v.playerId), amount0: io.qf(v.amount0, 0, 1, 0, 5), raw0: io.f32(v.raw0), amount1: io.qf(v.amount1, 0, 1, 0, 5), raw1: io.f32(v.raw1), raw2: io.f32(v.raw2), flags: boolArray(io, v.flags, 9), actionId: io.bounded(v.actionId, 0, 0x1401), signed0: io.bounded(v.signed0, -1, 8), signed1: io.bounded(v.signed1, -1, 8), finalFlag: io.u8(v.finalFlag) }; }
+function actionState(io, v = {}) { return { playerId: io.u8(v.playerId), amount0: io.qf(v.amount0, 0, 1, 0, 5), raw0: io.f32(v.raw0), amount1: io.qf(v.amount1, 0, 1, 0, 5), raw1: io.f32(v.raw1), raw2: io.f32(v.raw2), flags: boolArray(io, v.flags, 10), actionId: io.bounded(v.actionId, 0, 0x1401), signed0: io.bounded(v.signed0, -1, 8), signed1: io.bounded(v.signed1, -1, 8), finalFlag: io.u8(v.finalFlag) }; }
 function energyState(io, v = {}) { const maxEnergy = io.bounded(v.maxEnergy, 0, 14); return { maxEnergy, normalized: io.qf(v.normalized, 0, 1, 0, 6), low: io.bool(v.low), current: io.qf(v.current, -3, maxEnergy, 0, 14), velocity: io.qf(v.velocity, -4, 4, 0, 8), onlyUseFlightEnergy: io.bool(v.onlyUseFlightEnergy), charge: io.qf(v.charge, 0, 10, 0, 5), flight: io.qf(v.flight, 0, 10, 0, 5), flags: boolArray(io, v.flags, 5), raw0: io.f32(v.raw0), scalar0: io.qf(v.scalar0, -1, 2, 0, 16), scalar1: io.qf(v.scalar1, 1, 2, 1.5, 8), raw1: io.f32(v.raw1) }; }
 function animState(io, v = {}) { return { id: io.u32(v.id), time: io.u64(v.time), duration: io.qf(v.duration, 0, 3, 0, 12), raw: io.f32(v.raw), bytes: Array.from({ length: 4 }, (_, i) => io.u8(v.bytes?.[i])), mode: io.bounded(v.mode, 0, 8), variant: io.bounded(v.variant, 0, 10), weights: Array.from({ length: 3 }, (_, i) => io.qf(v.weights?.[i], 0, 1, 0, 5)), flag: io.bool(v.flag), blend: Array.from({ length: 5 }, (_, i) => io.qf(v.blend?.[i], 0, 1, 0, 8)), raw2: io.f32(v.raw2), final: io.qf(v.final, 0, 1, 0, 4) }; }
 
