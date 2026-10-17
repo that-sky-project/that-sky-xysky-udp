@@ -2,8 +2,24 @@
 
 English | [中文](README_zh.md)
 
+> [!IMPORTANT]
+> **Sky client version compatibility**
+>
+> This branch supports the **latest Sky client only (currently 0.35.1)**. The `PlayerState`
+> packet field layout changes with every Sky client release, and XYSKY UDP deliberately
+> follows the client's exact field layout, so each UDP build is paired with one specific Sky
+> client version.
+>
+> - **Older Sky clients:** check out the repository revision that matches your client, or use
+>   the build that does **not** parse `PlayerState` fields:
+>   [non-parsing build](https://github.com/that-sky-project/that-sky-xysky-udp/tree/8cb15f56a01fc96020080564cb52cce278798262).
+>   That build keeps working across client updates, at the cost of not understanding state
+>   fields.
+> - **Mixing client versions is not supported.** Players on different Sky client versions
+>   cannot share a room; only players on the same version can see each other.
+
 **XYSKY UDP** is a multiplayer room server implementing the network protocol used by
-*Sky: Children of the Light* (client 0.34.5). It is written in Node.js, uses
+*Sky: Children of the Light* (client 0.35.1). It is written in Node.js, uses
 [ENet](https://www.npmjs.com/package/sky-enet) for reliable UDP game traffic, and exposes
 read-only HTTP status endpoints plus Prometheus metrics.
 

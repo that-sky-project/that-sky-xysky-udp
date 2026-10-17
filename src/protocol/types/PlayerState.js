@@ -124,6 +124,9 @@ function playerState(io, v = {}) {
   o.offset_52bf = io.u8(v.offset_52bf);
   o.offset_52b0 = io.u16(v.offset_52b0);
   o.offset_519c = io.u32(v.offset_519c);
+  // New in 0.35.1: a 64-bit field is serialized between offset_519c and move
+  // (sub_140C9F280 +0x10B -> sub_140037C30 at state+0x52B8).
+  o.offset_52b8_u64 = io.u64(v.offset_52b8_u64);
   o.move = io.scoped('move', () => moveState(io, v.move));
   const bodyCount = io.bounded(v.body?.length ?? v.bodyCount, 0, 4);
   o.body = Array.from({ length: bodyCount }, (_, i) => io.scoped(`body[${i}]`, () => bodyKeyFrame(
@@ -298,13 +301,13 @@ function slotTable(io, v = {}, position = [0, 0, 0]) {
   const header = { countA, h0: io.bounded(v.h0, 0, 0xa1), h1: io.bounded(v.h1, 0, 7), h2: io.bounded(v.h2, 0, 0xa1), h3: io.bounded(v.h3, 0, 0x200), h4: io.bounded(v.h4, 0, 0x200), h5: io.bounded(v.h5, 0, 0xa1) };
   const wireCountA = io.u8(v.wireCountA ?? countA); const countB = io.u8(v.countB);
   const slotsA = Array.from({ length: wireCountA }, (_, i) => ({ active: io.bool(v.slotsA?.[i]?.active) }));
-  const slotsB = Array.from({ length: countB }, (_, i) => ({ active: io.bool(v.slotsB?.[i]?.active) }));
   for (let i = 0; i < slotsA.length; i += 1) if (slotsA[i].active) slotsA[i].kind = io.bool(v.slotsA?.[i]?.kind);
-  for (let i = 0; i < slotsB.length; i += 1) if (slotsB[i].active) slotsB[i].flag = io.bool(v.slotsB?.[i]?.flag);
+  const slotsB = Array.from({ length: countB }, (_, i) => ({ active: io.bool(v.slotsB?.[i]?.active) }));
   for (let i = 0; i < slotsA.length; i += 1) if (slotsA[i].active) {
     slotsA[i].flag0 = io.bool(v.slotsA?.[i]?.flag0);
     slotsA[i].flag1 = io.bool(v.slotsA?.[i]?.flag1);
   }
+  for (let i = 0; i < slotsB.length; i += 1) if (slotsB[i].active) slotsB[i].flag = io.bool(v.slotsB?.[i]?.flag);
   for (let i = 0; i < slotsA.length; i += 1) if (slotsA[i].active && slotsA[i].kind) {
     // suspected: nearby-player attachment flags and relative position.
     slotsA[i].nearFlag0 = io.bool(v.slotsA?.[i]?.nearFlag0);

@@ -2,7 +2,19 @@
 
 [English](README.md) | 中文
 
-**XYSKY UDP** 是面向《Sky: Children of the Light》（客户端 0.34.5）网络协议的多人房间服务端。
+> [!IMPORTANT]
+> **Sky 客户端版本兼容性**
+>
+> 本分支只适配**最新版 Sky 客户端（当前 0.35.1）**。`PlayerState` 数据包的字段布局每个 Sky
+> 版本都会变化，而 XYSKY UDP 严格按照客户端的字段布局解析，因此每个 UDP 版本都只对应一个
+> 特定的 Sky 客户端版本。
+>
+> - **旧版 Sky 客户端：**请切换到与该客户端版本对应的仓库提交，或使用**不解析
+>   `PlayerState` 字段**的版本：[不解析字段的版本](https://github.com/that-sky-project/that-sky-xysky-udp/tree/8cb15f56a01fc96020080564cb52cce278798262)。
+>   该版本不会因为客户端更新而失效，代价是无法理解状态字段。
+> - **不支持不同版本混连。**不同 Sky 客户端版本无法加入同一房间；只有版本相同的玩家才能看到彼此。
+
+**XYSKY UDP** 是面向《Sky: Children of the Light》（客户端 0.35.1）网络协议的多人房间服务端。
 使用 Node.js 开发，基于 [ENet](https://www.npmjs.com/package/sky-enet) 提供可靠 UDP 游戏通信，
 并对外暴露只读的 HTTP 状态接口与 Prometheus 指标。
 
