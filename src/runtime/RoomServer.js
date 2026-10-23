@@ -237,19 +237,11 @@ export class RoomServer {
 
   reannounceQwdState() {
     const active = this.players.listActive();
-    for (const player of active) {
-      this.qwd.publish('player.join', {
-        roomId: this.config.id,
-        player: {
-          playerId: player.uuid.toString(),
-          level: player.levelId
-        }
-      });
-    }
-    // The manager may have lost our delta base while the socket was down (and a
-    // restarted manager has no roster at all), so the first frame after a
-    // reconnect must be a full snapshot rather than a "nothing changed" no-op.
-    // Log it so it lines up with the manager's "telemetry resynchronized" line.
+    // No per-player player.join replay: the manager restores membership from
+    // room.created (which carries the authoritative player count) plus the full
+    // telemetry snapshot below. Replaying joins would bump the manager's
+    // occupancy once per player and double-count rooms that survived in its
+    // grace window.
     this.logger.info({
       roomId: this.config.id,
       players: active.length,

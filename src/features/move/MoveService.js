@@ -242,10 +242,26 @@ export class MoveService {
       if (move.status !== 'pending' || now - move.createdAt < this.moveTimeoutMs) continue;
       const player = this.players.list().find(item => item.id === move.playerId);
       if (player) {
-        // Client neither completed the move nor disconnected in time. Revert it
-        // to ACTIVE so the slot and authority are reclaimed instead of leaking.
-        this.cancelPlayerMove(player, 2);
-        this.logger.warn({ moveId: move.moveId, playerId: move.playerId }, 'move timed out; reverted session to active');
+        if (move.transactionId) {
+          // QWD initiated this migration: the client was told to join the
+          // destination. A source session that lingers past the timeout means
+          // the player may be reported by two rooms at once, so drop the old
+          // peer instead of reverting it to ACTIVE here.
+          this.pendingMoves.delete(move.moveId);
+          this.moveHistory.set(move.moveId, { ...move, status: 'aborted', abortReason: 'move_timeout', abortedAt: now });
+          this.logger.warn({ moveId: move.moveId, playerId: move.playerId }, 'qwd move timed out; disconnecting lingering source session');
+          try {
+            this.transport.disconnect(player.session.peerId, 'now');
+          } catch (error) {
+            this.logger.warn({ err: error, moveId: move.moveId, playerId: move.playerId }, 'failed to disconnect lingering source session');
+          }
+        } else {
+          // Client neither completed the move nor disconnected in time. Revert
+          // it to ACTIVE so the slot and authority are reclaimed instead of
+          // leaking.
+          this.cancelPlayerMove(player, 2);
+          this.logger.warn({ moveId: move.moveId, playerId: move.playerId }, 'move timed out; reverted session to active');
+        }
       } else {
         this.pendingMoves.delete(move.moveId);
         this.moveHistory.set(move.moveId, { ...move, status: 'aborted', abortReason: 'move_timeout', abortedAt: now });
