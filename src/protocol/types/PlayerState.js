@@ -132,6 +132,38 @@ export function decodePlayerState(buffer, { maxBytes = PLAYER_STATE_MAX_BYTES, m
   throw lastError ?? new ProtocolError('PlayerState could not be decoded');
 }
 
+/**
+ * Header + move only: stateKind, position and velocity.
+ *
+ * Cross-room migration is driven by where a player is and how fast they are
+ * moving; nothing below the move block is used. Stopping there skips the body
+ * frames, the queued pose, the outfit strings and the whole tail, which is
+ * where most of the cost — and most of the exposure to layout changes between
+ * client builds — lives.
+ *
+ * The layout is not self-validating in this mode (there is no "consumed the
+ * whole record" check), so callers pass the layout confirmed by a previous
+ * full decode.
+ */
+export function decodePlayerStateLite(buffer, { maxBytes = PLAYER_STATE_MAX_BYTES, mode = 2, idTable = null, layout = null } = {}) {
+  const rawState = Buffer.from(buffer ?? []);
+  assertStateSize(rawState, maxBytes);
+  const candidate = resolveLayout(layout);
+  const io = new NativeIo(new BinaryReader(rawState), { mode, idTable, layout: candidate });
+  const fields = {};
+  fields.stateKind = io.bounded(undefined, 0, 4);
+  fields.position = io.vec();
+  fields.net = netState(io);
+  fields.moveHeader = moveHeader(io);
+  fields.offset_52cb = io.u8();
+  fields.offset_52b0 = io.u16();
+  fields.offset_519c = io.u32();
+  if (candidate.offset52b8) fields.offset_52b8 = io.u64(0n);
+  fields.move = io.scoped('move', () => moveState(io));
+  return { version: VERSION, layout: candidate.id, rawState, fields, minimal: true, complete: false,
+    parsed: true, bits: io.bits, mode: io.mode };
+}
+
 export function encodePlayerState(state, { maxBytes = PLAYER_STATE_MAX_BYTES, preserveRaw = true, mode = 2, idTable = null } = {}) {
   if (Buffer.isBuffer(state) || state instanceof Uint8Array) {
     const raw = Buffer.from(state);

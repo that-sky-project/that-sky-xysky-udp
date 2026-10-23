@@ -5,18 +5,31 @@ English | [中文](README_zh.md)
 > [!IMPORTANT]
 > **Sky client version compatibility**
 >
-> This branch supports the **latest Sky client only (currently 0.35.1)**. The `PlayerState`
-> packet field layout changes with every Sky client release, and XYSKY UDP deliberately
-> follows the client's exact field layout, so each UDP build is paired with one specific Sky
-> client version.
+> This branch targets the **0.35.1 `PlayerState` layout**. The field layout changes between
+> Sky releases, and even builds of the same release do not always write the same field set:
+> some clients emit the extra 8-byte field at `state+0x52B8`, some omit it. The node
+> therefore identifies each player's layout at runtime and only accepts a variant that
+> consumes the record exactly, so both 0.35.1 build variants are supported out of the box.
 >
-> - **Older Sky clients:** check out the repository revision that matches your client, or use
->   the build that does **not** parse `PlayerState` fields:
->   [non-parsing build](https://github.com/that-sky-project/that-sky-xysky-udp/tree/8cb15f56a01fc96020080564cb52cce278798262).
->   That build keeps working across client updates, at the cost of not understanding state
->   fields.
-> - **Mixing client versions is not supported.** Players on different Sky client versions
->   cannot share a room; only players on the same version can see each other.
+> **`room.player_state_decode`** (in `config.yml`) selects how deep the node parses:
+>
+> - `full` *(default)* — every field of the record: position, move, body frames, queued
+>   pose, outfit, world quests, tail. Needed only if you want to inspect complete state.
+> - `basic` — stops after `stateKind`, `position` and the `move` block (velocity). That is
+>   all cross-room migration uses, it is roughly 20× cheaper, and it never touches the
+>   records below the move block — the ones that change most between client builds. The
+>   first frame of each player is still decoded in full to detect the layout, and later
+>   frames take the cheap path.
+>
+> If a record cannot be matched to a known layout, the node keeps the player in the room and
+> still reports its position (the first 12 bytes are fixed across all known revisions),
+> logs one full sample per failing signature instead of one line per frame, and continues.
+>
+> **Mixing client versions is not supported.** Players on different Sky client versions
+> cannot share a room; only players on the same version can see each other. For a client
+> whose `PlayerState` revision differs, set `room.player_state_decode: basic`: it stops
+> reading fields below the move block, so only the fixed header and the move block have to
+> match.
 
 **XYSKY UDP** is a multiplayer room server implementing the network protocol used by
 *Sky: Children of the Light* (client 0.35.1). It is written in Node.js, uses
@@ -105,6 +118,7 @@ room:
   bad_packet_limit: 8     # close a session after this many malformed packets
   move_timeout_ms: 20000  # revert a stuck MOVING session to ACTIVE after this (ms)
   move_targets: []        # optional static migration targets
+  player_state_decode: full  # full | basic (basic = position + velocity only)
 
 qwd:
   url: ""                 # EMPTY => standalone. Set a wss:// address to use a QWD manager.
@@ -125,6 +139,7 @@ qwd:
 | `room.bad_packet_limit` | `8` | Malformed-packet limit before the session is closed |
 | `room.move_timeout_ms` | `20000` | Revert a session stuck in MOVING back to ACTIVE after this |
 | `room.move_targets` | `[]` | Static migration targets (JSON/YAML array) |
+| `room.player_state_decode` | `full` | `full` parses every `PlayerState` field; `basic` reads only `stateKind` + position + velocity |
 | `qwd.url` | `""` | QWD WebSocket URL. **Empty = standalone, no manager connection.** |
 
 ### `room.public_uri`

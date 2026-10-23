@@ -102,7 +102,8 @@ export class RoomServer {
       players: this.players,
       levels: this.levels,
       broadcaster: this.broadcaster,
-      logger
+      logger,
+      stateDecode: this.config.playerStateDecode
     });
 
     this.moveService = new MoveService({

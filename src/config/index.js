@@ -25,6 +25,9 @@ const configSchema = z.object({
     max_packet_bytes: numberFrom(16384),
     bad_packet_limit: numberFrom(8),
     move_timeout_ms: numberFrom(20000),
+    // "full" parses every PlayerState field; "basic" stops after stateKind,
+    // position and the move block (velocity), which is all room migration uses.
+    player_state_decode: z.enum(['full', 'basic']).default('full'),
     move_targets: z.array(z.record(z.unknown())).default([])
   }).default({}),
   // Empty url => standalone node, no manager connection. See config.yml.
@@ -55,6 +58,7 @@ export function loadConfig(configFile = path.resolve(process.cwd(), 'config.yml'
       maxPacketBytes: parsed.room.max_packet_bytes,
       badPacketLimit: parsed.room.bad_packet_limit,
       moveTimeoutMs: parsed.room.move_timeout_ms,
+      playerStateDecode: parsed.room.player_state_decode,
       moveTargets: parsed.room.move_targets,
       qwdUrl: parsed.qwd.url
     }

@@ -5,14 +5,25 @@
 > [!IMPORTANT]
 > **Sky 客户端版本兼容性**
 >
-> 本分支只适配**最新版 Sky 客户端（当前 0.35.1）**。`PlayerState` 数据包的字段布局每个 Sky
-> 版本都会变化，而 XYSKY UDP 严格按照客户端的字段布局解析，因此每个 UDP 版本都只对应一个
-> 特定的 Sky 客户端版本。
+> 本分支适配 **0.35.1 的 `PlayerState` 布局**。该布局会随 Sky 版本变化，而且即使是同一个版本，
+> 不同客户端构建写出的字段集也不完全一样：有些客户端会写 `state+0x52B8` 处的 8 字节字段，
+> 有些则整个省略。因此节点会在运行时识别每个玩家的布局，并且只接受「恰好消费完整条记录」的
+> 变体，两种 0.35.1 构建都能直接使用。
 >
-> - **旧版 Sky 客户端：**请切换到与该客户端版本对应的仓库提交，或使用**不解析
->   `PlayerState` 字段**的版本：[不解析字段的版本](https://github.com/that-sky-project/that-sky-xysky-udp/tree/8cb15f56a01fc96020080564cb52cce278798262)。
->   该版本不会因为客户端更新而失效，代价是无法理解状态字段。
-> - **不支持不同版本混连。**不同 Sky 客户端版本无法加入同一房间；只有版本相同的玩家才能看到彼此。
+> **`room.player_state_decode`**（位于 `config.yml`）决定解析深度：
+>
+> - `full`（默认）—— 解析记录的全部字段：位置、移动、身体帧、排队姿态、外观、世界任务、尾部。
+>   只有需要查看完整状态时才需要它。
+> - `basic` —— 只解析到 `stateKind`、`position` 和 `move` 块（速度）为止。跨房间迁移（串线）只用
+>   这三个，CPU 开销约为全量解析的 1/20，而且完全不触碰 move 块之后的记录 —— 也就是不同客户端
+>   构建之间最容易变化的部分。每个玩家的第一帧仍会做一次全量解析以识别布局，之后走精简路径。
+>
+> 若某条记录无法匹配任何已知布局，节点不会踢掉玩家：位置仍照常上报（前 12 字节在所有已知版本中
+> 都不变），每种失败特征只完整输出一次样本（而不是每帧一条日志），然后继续运行。
+>
+> **不支持不同版本混连。**不同 Sky 客户端版本无法加入同一房间；只有版本相同的玩家才能看到彼此。
+> 若客户端使用其它 `PlayerState` 版本，把 `room.player_state_decode` 设为 `basic`：它不再读取
+> move 块之后的字段，只需要固定头部和 move 块对得上。
 
 **XYSKY UDP** 是面向《Sky: Children of the Light》（客户端 0.35.1）网络协议的多人房间服务端。
 使用 Node.js 开发，基于 [ENet](https://www.npmjs.com/package/sky-enet) 提供可靠 UDP 游戏通信，
@@ -95,6 +106,7 @@ room:
   bad_packet_limit: 8     # 单连接坏包达到该次数后关闭会话
   move_timeout_ms: 20000  # 卡在 MOVING 的会话超过该时间后恢复为 ACTIVE（毫秒）
   move_targets: []        # 可选的静态迁移目标
+  player_state_decode: full  # full | basic（basic 只解析位置与速度）
 
 qwd:
   url: ""                 # 为空 => 独立运行。填写 wss:// 地址即可接入 QWD 管理器。
@@ -114,6 +126,7 @@ qwd:
 | `room.max_packet_bytes` | `16384` | 最大客户端数据包字节数 |
 | `room.bad_packet_limit` | `8` | 关闭会话前允许的坏包次数 |
 | `room.move_timeout_ms` | `20000` | MOVING 卡住超过该时间后恢复为 ACTIVE |
+| `room.player_state_decode` | `full` | `full` 解析全部 `PlayerState` 字段；`basic` 只读 `stateKind` + 位置 + 速度 |
 | `room.move_targets` | `[]` | 静态迁移目标（数组） |
 | `qwd.url` | `""` | QWD WebSocket 地址。**为空 = 独立运行，不连接管理器。** |
 

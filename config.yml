@@ -16,6 +16,15 @@ room:
   # Revert a session stuck in MOVING back to ACTIVE if the client neither
   # completes the move nor disconnects within this window (ms).
   move_timeout_ms: 20000
+  # PlayerState decode depth.
+  #   full  - parse every field of the client's state record (default)
+  #   basic - stop after stateKind + position + the move block (velocity).
+  #           Cross-room migration only needs position and velocity, so this
+  #           mode skips the body/queued/outfit records entirely: less CPU and
+  #           far less exposure to layout changes between client builds.
+  # The first frame per player is always decoded in full to detect which
+  # client build it is; later frames use the cheap path.
+  player_state_decode: full
   move_targets: []
 
 # Room Authority / Room Manager (QWD) link.

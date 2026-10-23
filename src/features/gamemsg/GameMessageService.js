@@ -1,7 +1,7 @@
 import { PacketIds } from '../../protocol/PacketIds.js';
 import { GameMsgType } from '../../protocol/packets/shared/GameMsgPacket.js';
 import { decodeNetLevelDataMsg, encodeNetLevelDataMsg } from '../../protocol/types/NetLevelDataMsg.js';
-import { decodePlayerState, encodePlayerState } from '../../protocol/types/PlayerState.js';
+import { decodePlayerState, decodePlayerStateLite, encodePlayerState } from '../../protocol/types/PlayerState.js';
 import { NET_LEVEL_DATA_MAX_BYTES, PLAYER_STATE_MAX_BYTES, SNAPSHOT_MAX_DATA_BYTES } from '../../protocol/snapshot/constants.js';
 import { SnapshotWriter } from '../../protocol/snapshot/SnapshotWriter.js';
 import { netRpcRouter } from '../../protocol/packets/shared/netRpc/index.js';
@@ -29,17 +29,32 @@ function partialPlayerState(raw) {
 }
 
 export class GameMessageService {
-  constructor({ players, levels, broadcaster, logger }) {
+  constructor({ players, levels, broadcaster, logger, stateDecode = 'full' }) {
     this.players = players;
     this.levels = levels;
     this.broadcaster = broadcaster;
     this.logger = logger;
+    // "basic" keeps only stateKind/position/velocity (all migration needs);
+    // "full" parses the whole record.
+    this.stateDecode = stateDecode === 'basic' ? 'basic' : 'full';
     this.latestAcks = new Map();
     // Decode failures repeat on every snapshot. Report each failure signature
     // once (with the full state, so it can be fixed offline) and otherwise at
     // most one warning per player per window.
     this.decodeWarnAt = new Map();
     this.decodeDumpSignatures = new Set();
+  }
+
+  /**
+   * Basic mode cannot validate the layout on its own (it stops long before the
+   * end of the record), so the first frame of every player is decoded in full
+   * to identify the client build and remembered on the player.
+   */
+  decodeState(player, data) {
+    if (this.stateDecode === 'basic' && player.lastStateLayout) {
+      return decodePlayerStateLite(data, { layout: player.lastStateLayout });
+    }
+    return decodePlayerState(data, { preferredLayout: player.lastStateLayout });
   }
 
   /**
@@ -250,7 +265,7 @@ export class GameMessageService {
       // remote PlayerId in syncPlayerStates(), as required by the client reader.
       source.playerDelta.rawState = decoded.data;
       try {
-        source.playerDelta.decodedState = decodePlayerState(decoded.data, { preferredLayout: source.lastStateLayout });
+        source.playerDelta.decodedState = this.decodeState(source, decoded.data);
         // Remember which build this client runs so later frames skip the
         // layout that always fails for it.
         source.lastStateLayout = source.playerDelta.decodedState.layout;
@@ -670,7 +685,10 @@ export class GameMessageService {
     const entries = [];
     for (const peer of activePlayers) {
       let raw = peer.playerDelta.rawState;
-      if (peer.playerDelta.decodedState) {
+      // A minimal (basic mode) or partial view holds no complete field set, so
+      // relay the bytes the client actually sent instead of re-encoding them.
+      const decoded = peer.playerDelta.decodedState;
+      if (decoded && !decoded.minimal && !decoded.partial) {
         try {
           raw = encodePlayerState(peer.playerDelta.decodedState);
         } catch (error) {
