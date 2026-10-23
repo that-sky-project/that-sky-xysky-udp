@@ -1,7 +1,6 @@
 import { loadConfig } from './config/index.js';
 import { createLogger } from './observability/logger.js';
-import { createHttpServer } from './api/httpServer.js';
-import { RoomServer } from './session/RoomServer.js';
+import { RoomServer } from './runtime/RoomServer.js';
 import { createMetrics } from './observability/metrics.js';
 
 const config = loadConfig();
@@ -9,7 +8,6 @@ const logger = createLogger(config.logging);
 const metrics = createMetrics();
 
 const room = new RoomServer({ config: config.room, logger, metrics });
-const api = await createHttpServer({ config: config.http, logger, room, metrics });
 
 let shuttingDown = false;
 
@@ -22,7 +20,6 @@ async function shutdown(signal) {
   logger.info({ signal }, 'shutdown requested');
 
   await Promise.allSettled([
-    api.close(),
     room.stop()
   ]);
 }
@@ -43,24 +40,14 @@ process.on('unhandledRejection', reason => {
 async function bootstrap() {
   logger.info({
     enet: `${config.room.host}:${config.room.port}`,
-    http: `${config.http.host}:${config.http.port}`,
     roomId: config.room.id
   }, 'starting server');
 
   try {
     await room.start();
     logger.info({
-      enet: `${config.room.host}:${config.room.port}`
-    }, 'enet transport ready');
-
-    await api.listen();
-    logger.info({
-      http: `${config.http.host}:${config.http.port}`
-    }, 'http api ready');
-
-    logger.info({
       enet: `${config.room.host}:${config.room.port}`,
-      http: `${config.http.host}:${config.http.port}`
+      roomId: config.room.id
     }, 'server started');
   } catch (error) {
     logger.fatal({ err: error }, 'startup failed');

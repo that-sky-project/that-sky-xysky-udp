@@ -27,7 +27,6 @@ const configSchema = z.object({
     move_timeout_ms: numberFrom(20000),
     move_targets: z.array(z.record(z.unknown())).default([])
   }).default({}),
-  http: z.object({ host: z.string().default('0.0.0.0'), port: numberFrom(19132) }).default({}),
   // Empty url => standalone node, no manager connection. See config.yml.
   qwd: z.object({ url: z.string().trim().default('') }).default({})
 });
@@ -58,8 +57,7 @@ export function loadConfig(configFile = path.resolve(process.cwd(), 'config.yml'
       moveTimeoutMs: parsed.room.move_timeout_ms,
       moveTargets: parsed.room.move_targets,
       qwdUrl: parsed.qwd.url
-    },
-    http: { host: parsed.http.host, port: parsed.http.port }
+    }
   };
 }
 

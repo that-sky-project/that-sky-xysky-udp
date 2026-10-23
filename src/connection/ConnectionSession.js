@@ -1,22 +1,10 @@
-import { StateError } from '../utils/errors.js';
+import { StateError } from '../errors.js';
+import { ConnectionState, TRANSITIONS } from './states.js';
 
 let nextSessionId = 1;
 
-export const ConnectionState = Object.freeze({
-  CONNECTED: 'CONNECTED',
-  PENDING: 'PENDING',
-  ACTIVE: 'ACTIVE',
-  MOVING: 'MOVING',
-  CLOSED: 'CLOSED'
-});
-
-const TRANSITIONS = Object.freeze({
-  [ConnectionState.CONNECTED]: new Set([ConnectionState.PENDING, ConnectionState.CLOSED]),
-  [ConnectionState.PENDING]: new Set([ConnectionState.ACTIVE, ConnectionState.CLOSED]),
-  [ConnectionState.ACTIVE]: new Set([ConnectionState.MOVING, ConnectionState.CLOSED]),
-  [ConnectionState.MOVING]: new Set([ConnectionState.ACTIVE, ConnectionState.CLOSED]),
-  [ConnectionState.CLOSED]: new Set()
-});
+// Re-exported for callers that already import the session module directly.
+export { ConnectionState };
 
 export class ConnectionSession {
   constructor({ peerId, roomId }) {

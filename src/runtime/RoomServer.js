@@ -1,22 +1,22 @@
 import { PacketCodec } from '../protocol/PacketCodec.js';
-import { PacketIds } from '../protocol/PacketIds.js';
-import { GameMsgType } from '../protocol/packets/shared/GameMsgPacket.js';
-import { ConnectionManager } from './ConnectionManager.js';
+import { TgcUuid } from '../protocol/types/TgcUuid.js';
+import { ConnectionManager } from '../connection/ConnectionManager.js';
+import { PacketDispatcher } from '../connection/PacketDispatcher.js';
+import { registerAllHandlers } from '../connection/handlers/index.js';
 import { PlayerStore } from '../domain/PlayerStore.js';
 import { LevelStateStore } from '../domain/LevelStateStore.js';
 import { RoomDirectory } from '../domain/RoomDirectory.js';
 import { EnetServer } from '../transport/EnetServer.js';
-import { BroadcastService } from '../services/BroadcastService.js';
-import { JoinService } from '../services/JoinService.js';
-import { LevelService } from '../services/LevelService.js';
-import { GameMessageService } from '../services/GameMessageService.js';
-import { MoveService } from '../services/MoveService.js';
-import { PacketDispatcher } from './PacketDispatcher.js';
+import { BroadcastService } from '../features/broadcast/BroadcastService.js';
+import { JoinService } from '../features/join/JoinService.js';
+import { LevelService } from '../features/level/LevelService.js';
+import { GameMessageService } from '../features/gamemsg/GameMessageService.js';
+import { MoveService } from '../features/move/MoveService.js';
+import { QwdClient } from '../qwd/QwdClient.js';
+import { ErrorCode, fail, ok } from '../qwd/errorCodes.js';
 import { PeerEventHandler } from './PeerEventHandler.js';
 import { TickLoop } from './TickLoop.js';
-import { registerAllHandlers } from './handlers/index.js';
-import { AuthorityElectionGate, revokeAndRebalanceAuthority } from './AuthorityElectionCoordinator.js';
-import { QwdClient } from '../services/QwdClient.js';
+import { AuthorityElectionGate } from './AuthorityElectionCoordinator.js';
 
 export class RoomServer {
   constructor({ config, logger, metrics }) {
@@ -29,12 +29,36 @@ export class RoomServer {
     this.sessions = new ConnectionManager({ roomId: config.id });
     // Sky rooms are semantically capped at eight players even when the ENet
     // peer socket pool is configured larger for handshakes or spectators.
-    this.players = new PlayerStore({ maxPlayers: 8 });
+    this.roomCapacity = 8;
+    this.players = new PlayerStore({ maxPlayers: this.roomCapacity });
     this.levels = new LevelStateStore({ roomId: config.id, logger });
     this.rooms = new RoomDirectory();
-    this.qwd = new QwdClient({ url: config.qwdUrl, room: config, logger, onCommand: command => this.handleQwdCommand(command), onRoomIdConflict: roomId => this.handleRoomIdConflict(roomId), onConnected: () => this.reannounceQwdState() });
+    this.qwd = new QwdClient({
+      url: config.qwdUrl,
+      room: config,
+      logger,
+      onCommand: command => this.handleQwdCommand(command),
+      onRoomIdConflict: roomId => this.handleRoomIdConflict(roomId),
+      onConnected: () => this.reannounceQwdState(),
+      snapshot: () => ({ players: this.players.size, version: this.telemetrySeq, capacity: this.roomCapacity }),
+      // A dropped control socket does not cancel an in-flight migration — the
+      // client is still moving. Keep reservations but stop honouring them
+      // indefinitely: shrink the TTL so capacity cannot leak if the manager
+      // never returns.
+      onTransportDropped: () => {
+        const deadline = Date.now() + 15000;
+        for (const reservation of this.qwdReservations.values()) {
+          reservation.expiresAt = Math.min(reservation.expiresAt, deadline);
+        }
+      }
+    });
     this.telemetrySeq = 0;
     this.lastQwdTelemetryAt = 0;
+    // Differential telemetry bookkeeping.
+    this.lastTelemetryRoster = null;
+    this.lastTelemetrySeqSent = 0;
+    this.lastFullTelemetrySeq = 0;
+    this.lastFullTelemetryAt = 0;
     this.qwdReservations = new Map();
     this.migrationRosters = new Map();
     this.authorityElectionGate = new AuthorityElectionGate();
@@ -64,7 +88,7 @@ export class RoomServer {
         claim: (session, payload) => this.claimMigrationRoster(session, payload),
         complete: roster => this.completeMigrationRoster(roster)
       },
-      onPlayerJoined: player => { this.consumeQwdReservation(player.uuid.toString()); this.qwd.publish('player.join', { roomId: this.config.id, player: { playerId: player.uuid.toString() } }); }
+      onPlayerJoined: player => { this.consumeQwdReservation(player.uuid.toString()); this.qwd.publish('player.join', { roomId: this.config.id, player: { playerId: player.uuid.toString(), level: player.levelId } }); }
     });
 
     this.levelService = new LevelService({
@@ -170,7 +194,7 @@ export class RoomServer {
 
   handleRoomIdConflict(roomId) {
     this.config.id = roomId;
-    this.sessions.roomId = roomId;
+    this.sessions.setRoomId(roomId);
     this.levels.roomId = roomId;
   }
 
@@ -188,58 +212,6 @@ export class RoomServer {
     this.publishQwdTelemetry();
   }
 
-  // ── Management API (used by httpServer) ─────────────────────────────────────
-
-  kickPlayer(playerId, reason = 0) {
-    const player = this.players.getById(Number(playerId));
-    if (!player) {
-      return false;
-    }
-
-    const reasonStr = typeof reason === 'string' ? reason : String(reason);
-    this.broadcaster.send(player.session, {
-      id: PacketIds.Kick,
-      payload: { reason: reasonStr }
-    });
-    this.transport.disconnect(player.session.peerId, 'later', reason);
-    return true;
-  }
-
-  broadcastRpc({ levelId, playerId = 0, rpcData }) {
-    const data = Buffer.isBuffer(rpcData)
-      ? rpcData
-      : Buffer.from(String(rpcData ?? ''), 'utf8');
-
-    for (const player of this.players.list()) {
-      if (levelId !== undefined && player.levelId !== Number(levelId)) {
-        continue;
-      }
-
-      this.broadcaster.send(player.session, {
-        id: PacketIds.GameMsg,
-        payload: {
-          type: GameMsgType.NetRpc,
-          levelChangeCount: player.lvSeq,
-          sourcePlayer: 0,
-          playerId,
-          rpcData: data
-        }
-      });
-    }
-  }
-
-  revokeLevelAuthority(levelId, reason = 0) {
-    const nLevelId = Number(levelId);
-    return revokeAndRebalanceAuthority({
-      levelId: nLevelId,
-      reason,
-      levels: this.levels,
-      levelService: this.levelService,
-      gameMessageService: this.gameMessageService,
-      electionGate: this.authorityElectionGate
-    });
-  }
-
   _handleAuthorityElected(levelId, authority, targetPlayer) {
     if (this.authorityElectionGate.isSuppressed(levelId)) {
       return;
@@ -251,51 +223,6 @@ export class RoomServer {
     for (const player of this.players.listActiveInLevel(levelId)) {
       this.gameMessageService.sendElect(player, authority, this.levels.loadLevelData(levelId));
     }
-  }
-
-  registerMoveTarget(room) {
-    return this.rooms.register(room);
-  }
-
-  unregisterMoveTarget(roomId) {
-    return this.rooms.unregister(roomId);
-  }
-
-  movePlayerToRoom(playerId, roomId = undefined) {
-    const player = this.players.getById(Number(playerId));
-    if (!player) {
-      return { ok: false, reason: 'player_not_found' };
-    }
-
-    const target = roomId
-      ? this.rooms.getById(roomId)
-      : this.rooms.findTarget({ levelId: player.levelId });
-
-    if (!target) {
-      this.moveService.cancelPlayerMove(player, 1);
-      return { ok: false, reason: 'target_not_found' };
-    }
-
-    return {
-      ok: this.moveService.movePlayer(player, target),
-      targetRoomId: target.id
-    };
-  }
-
-  moveLevelToRoom(levelId, roomId = undefined) {
-    const target = roomId
-      ? this.rooms.getById(roomId)
-      : this.rooms.findTarget({ levelId });
-
-    if (!target) {
-      return { ok: false, reason: 'target_not_found' };
-    }
-
-    return {
-      ok: true,
-      moved: this.moveService.moveLevel(levelId, target),
-      targetRoomId: target.id
-    };
   }
 
   onTick() {
@@ -382,66 +309,132 @@ export class RoomServer {
       const roomId = String(command.data?.roomId ?? '');
       const playerId = String(command.data?.playerId ?? '');
       if (!roomId || roomId !== String(this.config.id) || !playerId) {
-        return { code: 4000, data: { message: 'invalid room reservation' } };
+        return fail(ErrorCode.BAD_REQUEST, 'invalid room reservation');
       }
-      for (const [reservationId, reservation] of this.qwdReservations) {
-        if (reservation.playerIds.has(playerId)) {
-          return { code: 0, data: { accepted: true, reservationId, slots: 1 } };
-        }
+      const existingId = this.findReservationByPlayer(playerId);
+      if (existingId) {
+        return ok({ accepted: true, reservationId: existingId, slots: 1 });
       }
-      const reserved = [...this.qwdReservations.values()].reduce((sum, item) => sum + item.playerIds.size, 0);
-      if (this.players.size + reserved + 1 > 8) return { code: 4029, data: { message: 'room capacity reserved' } };
+      if (!this.hasReservationCapacity(1)) {
+        return fail(ErrorCode.NO_CAPACITY, 'room capacity reserved');
+      }
       const reservationId = `allocation-${playerId}-${Date.now()}`;
       this.qwdReservations.set(reservationId, {
         playerIds: new Set([playerId]),
         joined: new Set(),
         expiresAt: Date.now() + Number(command.data?.ttlMs ?? 15000)
       });
-      return { code: 0, data: { accepted: true, reservationId, slots: 1 } };
+      return ok({ accepted: true, reservationId, slots: 1 });
     }
     if (command.cmd === 'move.prepare') {
       const moveId = String(command.data?.moveId ?? '');
       const playerIds = Array.isArray(command.data?.playerIds) ? command.data.playerIds.map(String) : [];
-      if (!moveId || !playerIds.length || new Set(playerIds).size !== playerIds.length) return { code: 4000, data: { message: 'invalid move prepare' } };
+      if (!moveId || !playerIds.length || new Set(playerIds).size !== playerIds.length) return fail(ErrorCode.BAD_REQUEST, 'invalid move prepare');
       const existing = this.qwdReservations.get(moveId);
       if (existing) {
         const same = existing.playerIds.size === playerIds.length && playerIds.every(id => existing.playerIds.has(id));
-        if (!same) return { code: 4009, data: { message: 'move reservation conflicts' } };
+        if (!same) return fail(ErrorCode.CONFLICT, 'move reservation conflicts');
         existing.expiresAt = Date.now() + Number(command.data?.ttlMs ?? 15000);
-        return { code: 0, data: { accepted: true, moveId, slots: playerIds.length, idempotent: true } };
+        return ok({ accepted: true, moveId, slots: playerIds.length, idempotent: true, version: this.telemetrySeq });
       }
-      const reserved = [...this.qwdReservations.values()].reduce((sum, item) => sum + item.playerIds.size, 0);
-      if (this.players.size + reserved + playerIds.length > 8) return { code: 4029, data: { message: 'room capacity reserved' } };
+      if (!this.hasReservationCapacity(playerIds.length)) {
+        return fail(ErrorCode.NO_CAPACITY, 'room capacity reserved');
+      }
+
+      // The manager plans against a cached room snapshot. If its expectedVersion
+      // predates our latest telemetry the plan was built from stale state: report
+      // a conflict instead of executing a migration that no longer matches.
+      const expectedVersion = command.data?.expectedVersion;
+      if (typeof expectedVersion === 'number' && Number.isFinite(expectedVersion)) {
+        const currentVersion = this.telemetrySeq;
+        if (expectedVersion < currentVersion && currentVersion - expectedVersion > 3) {
+          return fail(ErrorCode.STALE_PLAN, 'room state advanced past the plan', { expectedVersion, currentVersion, players: this.players.size });
+        }
+      }
+
       this.qwdReservations.set(moveId, { playerIds: new Set(playerIds), joined: new Set(), expiresAt: Date.now() + Number(command.data?.ttlMs ?? 15000) });
-      return { code: 0, data: { accepted: true, moveId, slots: playerIds.length } };
+      return ok({ accepted: true, moveId, slots: playerIds.length, version: this.telemetrySeq });
     }
     if (command.cmd === 'move.cancel') {
       this.qwdReservations.delete(String(command.data?.moveId ?? ''));
-      return { code: 0, data: { accepted: true } };
+      return ok();
     }
-    if (command.cmd !== 'move.commit' && command.cmd !== 'player.redirect') return { code: 4000, data: { message: 'unsupported command' } };
+    if (command.cmd !== 'move.commit' && command.cmd !== 'player.redirect') return fail(ErrorCode.BAD_REQUEST, 'unsupported command');
     const ids = command.data?.playerIds ?? [command.data?.playerId];
     const group = [];
     for (const id of ids) {
       const player = this.players.list().find(item => item.uuid.toString() === String(id) || item.id === Number(id));
-      if (!player || !command.data?.udpHost) return { code: 4004, data: { message: 'source player not found', playerId: id } };
+      if (!player || !command.data?.udpHost) return fail(ErrorCode.NOT_FOUND, 'source player not found', { playerId: id });
       group.push(player);
     }
-    const target = { id: command.data.toRoomId, address: { host: command.data.udpHost, port: command.data.udpPort, toApi() { return this; } } };
+    // MoveGame.destinationUuid must identify the destination room. QWD addresses
+    // rooms by id, and node room ids are UUIDs, so the id is the UUID unless the
+    // manager supplies a distinct one.
+    const toRoomUuid = command.data.toRoomUuid ?? command.data.toRoomId;
+    if (!TgcUuid.isText(toRoomUuid)) return fail(ErrorCode.BAD_REQUEST, 'invalid destination room uuid', { toRoomId: command.data.toRoomId });
+    const target = { id: command.data.toRoomId, udpHost: command.data.udpHost, udpPort: command.data.udpPort, uuid: toRoomUuid, address: { host: command.data.udpHost, port: command.data.udpPort, toApi() { return { host: this.host, port: this.port }; } } };
     const result = this.moveService.movePlayersAtomic(group, target, { moveId: command.data.moveId });
     this.qwd.publish('move.result', { roomId: this.config.id, moveId: command.data.moveId, accepted: result.accepted, reason: result.reason });
-    return { code: result.accepted ? 0 : 409, data: result };
+    // Was `409`, which the manager cannot match against its ErrorCode enum and
+    // therefore reports as an unknown failure. CONFLICT (4009) carries the
+    // "move could not be applied" meaning the manager expects.
+    return result.accepted ? ok(result) : { code: ErrorCode.CONFLICT, data: result };
+  }
+
+  /** Slots currently held by unexpired reservations. */
+  reservedSlots() {
+    let total = 0;
+    for (const reservation of this.qwdReservations.values()) total += reservation.playerIds.size;
+    return total;
+  }
+
+  /**
+   * Whether `count` more players fit alongside live players and existing holds.
+   * Both room.reserve and move.prepare used to inline this formula; keeping one
+   * copy means the cap cannot drift between the two paths.
+   */
+  hasReservationCapacity(count) {
+    return this.players.size + this.reservedSlots() + count <= this.roomCapacity;
+  }
+
+  /** The reservation already holding this player, if any (reserve is idempotent). */
+  findReservationByPlayer(playerId) {
+    const wanted = String(playerId);
+    for (const [reservationId, reservation] of this.qwdReservations) {
+      if (reservation.playerIds.has(wanted)) return reservationId;
+    }
+    return undefined;
   }
 
   expireQwdReservations(now = Date.now()) {
-    for (const [moveId, reservation] of this.qwdReservations) if (reservation.expiresAt <= now) this.qwdReservations.delete(moveId);
+    for (const [moveId, reservation] of this.qwdReservations) {
+      if (reservation.expiresAt > now) continue;
+      this.qwdReservations.delete(moveId);
+      // Tell the manager the hold is gone so it can settle the transaction
+      // immediately instead of waiting for its own 15s timeout.
+      this.qwd.publish('reservation.expired', {
+        roomId: this.config.id,
+        moveId,
+        playerIds: [...reservation.playerIds]
+      });
+    }
   }
 
   consumeQwdReservation(playerId) {
     for (const [moveId, reservation] of this.qwdReservations) {
       if (!reservation.playerIds.has(String(playerId))) continue;
       reservation.joined.add(String(playerId));
-      if (reservation.joined.size >= reservation.playerIds.size) this.qwdReservations.delete(moveId);
+      if (reservation.joined.size >= reservation.playerIds.size) {
+        this.qwdReservations.delete(moveId);
+        // Positive confirmation that the whole group landed. The manager
+        // otherwise infers completion from player.join/leave alone, which is
+        // fragile when a client is lost mid-migration.
+        this.qwd.publish('move.completed', {
+          roomId: this.config.id,
+          moveId,
+          playerIds: [...reservation.playerIds]
+        });
+      }
     }
   }
 
@@ -460,27 +453,71 @@ export class RoomServer {
         return peer ? [peer.uuid.toString(), Math.max(0, Math.min(1, Number(entry.value) / 255))] : null;
       }).filter(Boolean))
     }));
-    this.qwd.publishTelemetry(players, ++this.telemetrySeq);
+    const seq = ++this.telemetrySeq;
+
+    // Differential telemetry: after the first snapshot only send players whose
+    // observable state changed, plus the ids that left. Falls back to a full
+    // snapshot every FULL_RESYNC_EVERY frames so a desynced manager self-heals.
+    const previous = this.lastTelemetryRoster;
+    const current = new Map();
+    for (const player of players) current.set(player.playerId, player);
+
+    const canDelta =
+      previous !== null &&
+      previous.size > 0 &&
+      seq - this.lastFullTelemetrySeq < 30 &&
+      now - this.lastFullTelemetryAt < 30_000;
+
+    if (!canDelta) {
+      this.qwd.publishTelemetry(players, seq);
+      this.lastTelemetryRoster = current;
+      this.lastFullTelemetrySeq = seq;
+      this.lastFullTelemetryAt = now;
+      this.lastTelemetrySeqSent = seq;
+      return;
+    }
+
+    const changed = [];
+    for (const [playerId, player] of current) {
+      const before = previous.get(playerId);
+      if (!before || !this.sameTelemetry(before, player)) changed.push(player);
+    }
+    const removed = [];
+    for (const playerId of previous.keys()) {
+      if (!current.has(playerId)) removed.push(playerId);
+    }
+
+    if (changed.length === 0 && removed.length === 0) {
+      // Nothing observable changed: skip the frame entirely. baseSeq still
+      // advances because the manager treats an unseen seq as a gap and will
+      // wait for the next full snapshot, which is what we want.
+      this.lastTelemetryRoster = current;
+      return;
+    }
+
+    this.qwd.publishTelemetry(changed, seq, { kind: 'delta', baseSeq: this.lastTelemetrySeqSent, removedPlayers: removed });
+    this.lastTelemetryRoster = current;
+    this.lastTelemetrySeqSent = seq;
   }
 
-  getStatus() {
-    return {
-      host: this.config.host,
-      roomId: this.config.id,
-      port: this.config.port,
-      publicUri: this.config.publicUri,
-      publicHost: this.config.publicHost,
-      publicPort: this.config.publicPort,
-      peers: this.sessions.size,
-      players: this.players.size,
-      tickRate: this.config.tickRate,
-      limits: {
-        maxPacketBytes: this.config.maxPacketBytes,
-        badPacketLimit: this.config.badPacketLimit
-      },
-      moveTargets: this.rooms.list(),
-      pendingMoves: this.moveService.listPending(),
-      moveHistory: this.moveService.listHistory()
-    };
+  sameTelemetry(a, b) {
+    if (a.levelId !== b.levelId) return false;
+    if (a.velocity !== b.velocity) return false;
+    const ap = a.position;
+    const bp = b.position;
+    if (!ap !== !bp) return false;
+    if (ap && bp && (ap[0] !== bp[0] || ap[1] !== bp[1] || ap[2] !== bp[2])) return false;
+    return this.sameAffinity(a.affinity, b.affinity);
   }
+
+  sameAffinity(a, b) {
+    const ak = a ? Object.keys(a) : [];
+    const bk = b ? Object.keys(b) : [];
+    if (ak.length !== bk.length) return false;
+    for (const key of ak) {
+      if (!b || b[key] !== a[key]) return false;
+    }
+    return true;
+  }
+
 }

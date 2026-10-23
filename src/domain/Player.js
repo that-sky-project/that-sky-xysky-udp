@@ -1,4 +1,4 @@
-import { PlayerSnapshotState } from './PlayerSnapshotState.js';
+import { PlayerSnapshotState } from '../features/gamemsg/PlayerSnapshotState.js';
 
 export class Player {
   constructor({ id, uuid, session, levelId, netVersion, levelChangeCount = 0 }) {

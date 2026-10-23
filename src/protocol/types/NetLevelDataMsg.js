@@ -1,7 +1,7 @@
 import { BinaryReader } from '../binary/BinaryReader.js';
 import { BinaryWriter } from '../binary/BinaryWriter.js';
 import { NET_LEVEL_DATA_MAX_BYTES } from '../snapshot/constants.js';
-import { ProtocolError } from '../../utils/errors.js';
+import { ProtocolError } from '../../errors.js';
 
 export function decodeNetLevelDataMsg(buffer, options = {}) {
   const reader = buffer instanceof BinaryReader ? buffer : new BinaryReader(buffer);

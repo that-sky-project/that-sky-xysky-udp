@@ -1,7 +1,7 @@
 import { BinaryReader } from './binary/BinaryReader.js';
 import { BinaryWriter } from './binary/BinaryWriter.js';
 import { packetTypes } from './PacketRegistry.js';
-import { ProtocolError } from '../utils/errors.js';
+import { ProtocolError } from '../errors.js';
 
 export class PacketCodec {
   decodeClient(buffer) {
@@ -12,7 +12,18 @@ export class PacketCodec {
     const packetType = packetTypes.get(id);
 
     if (!packetType?.decode) {
-      throw new ProtocolError('unknown client packet', { id });
+      // 0.35.1 client sends outer id 16 (0-byte keepalive/probe). Both
+      // Pending (0x140E85320) and Active (0x140E85480) have no handler
+      // for it and just log Unknown — keep compat by swallowing it.
+      const raw = reader.remaining > 0 ? reader.readBytes(reader.remaining) : Buffer.alloc(0);
+      return {
+        id,
+        name: `Unknown${id}`,
+        token,
+        sequence,
+        payload: { raw, unknownId: id },
+        unknown: true
+      };
     }
 
     const payload = packetType.decode(reader, { fromServer: false });

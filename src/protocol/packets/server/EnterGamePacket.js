@@ -1,5 +1,5 @@
 import { PacketIds } from '../../PacketIds.js';
-import { ProtocolError } from '../../../utils/errors.js';
+import { ProtocolError } from '../../../errors.js';
 
 const MAX_ENTER_GAME_PLAYERS = 8;
 

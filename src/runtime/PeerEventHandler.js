@@ -1,5 +1,5 @@
 import { PacketIds } from '../protocol/PacketIds.js';
-import { ConnectionState } from './ConnectionSession.js';
+import { ConnectionState } from '../connection/states.js';
 
 export class PeerEventHandler {
   constructor({ config, sessions, codec, dispatcher, players, levelService, moveService, broadcaster, transport, metrics, logger, onPlayerLeft }) {
@@ -60,6 +60,15 @@ export class PeerEventHandler {
         channel,
         rawPacket: formatPacketBytes(data)
       }, 'failed to process packet');
+      return;
+    }
+
+    // Outer id 16 (and any future unknown outer id) is a 0-byte keepalive
+    // probe in 0.35.1. IDA: Pending 0x140E85320 and Active 0x140E85480 both
+    // have no handler and just log "Unknown message:" — swallow without
+    // bad-packet penalty, token/dispatcher/metrics bypassed.
+    if (packet.unknown) {
+      this.logger.debug({ peerId: peerId.toString(), sessionId: session.id, channel, id: packet.id, sequence: packet.sequence }, 'ignored unknown client packet');
       return;
     }
 

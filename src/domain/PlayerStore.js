@@ -1,5 +1,5 @@
 import { Player } from './Player.js';
-import { StateError } from '../utils/errors.js';
+import { StateError } from '../errors.js';
 
 export class PlayerStore {
   constructor({ maxPlayers = 8 } = {}) {

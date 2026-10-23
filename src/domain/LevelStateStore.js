@@ -1,4 +1,4 @@
-import { StateError } from '../utils/errors.js';
+import { StateError } from '../errors.js';
 
 export class LevelStateStore {
   constructor({ roomId, logger }) {

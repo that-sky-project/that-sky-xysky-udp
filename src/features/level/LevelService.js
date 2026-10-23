@@ -1,4 +1,4 @@
-import { PacketIds } from '../protocol/PacketIds.js';
+import { PacketIds } from '../../protocol/PacketIds.js';
 
 export class LevelService {
   constructor({ players, levels, broadcaster, logger }) {

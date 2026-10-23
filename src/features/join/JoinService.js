@@ -1,5 +1,5 @@
-import { PacketIds } from '../protocol/PacketIds.js';
-import { ConnectionState } from '../session/ConnectionSession.js';
+import { PacketIds } from '../../protocol/PacketIds.js';
+import { ConnectionState } from '../../connection/states.js';
 
 export class JoinService {
   constructor({ players, levels, broadcaster, logger, metrics, migration, onPlayerJoined }) {

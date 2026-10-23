@@ -2,7 +2,7 @@ import { PacketIds } from '../../PacketIds.js';
 import { TgcUuid } from '../../types/TgcUuid.js';
 import { NetVersion } from '../../types/NetVersion.js';
 import { NetAddress } from '../../types/NetAddress.js';
-import { ProtocolError } from '../../../utils/errors.js';
+import { ProtocolError } from '../../../errors.js';
 
 const MAX_MOVE_PLAYERS = 7;
 const MAX_LEVEL_DATA_BYTES = 0x2000;

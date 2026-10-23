@@ -1,7 +1,7 @@
 import { PacketIds } from '../../PacketIds.js';
 import { NetAddress } from '../../types/NetAddress.js';
 import { TgcUuid } from '../../types/TgcUuid.js';
-import { ProtocolError } from '../../../utils/errors.js';
+import { ProtocolError } from '../../../errors.js';
 
 const MAX_MOVE_PLAYERS = 7;
 
@@ -43,12 +43,19 @@ export class MoveGamePacket {
 
     writer.writeUInt32(packet.u32Field ?? 0);
     writer.writeUInt8(packet.u08Field ?? 0);
-    writer.writeUInt32(packet.u32Field2 ?? 0);
+    // u32Field2 lands in the client's matchmaking reservation slot (state+420)
+    // when the move is accepted. 0xFFFFFFFF means "no event reservation"; a
+    // plain 0 here leaves the client in a phantom reservation state that makes
+    // every later generic mm signal ("EventId 0") get rejected, deadlocking
+    // reconnection until the next non-generic move.
+    writer.writeUInt32(packet.u32Field2 ?? 0xFFFFFFFF);
     writer.writeBool(packet.isSplit);
 
-    const destUuid = packet.destinationUuid instanceof TgcUuid
-      ? packet.destinationUuid
-      : new TgcUuid(packet.destinationUuid != null ? packet.destinationUuid : Buffer.alloc(16));
+    // destination_uuid identifies the destination room. Statically configured
+    // move targets have no known uuid, so keep the legacy zeroed encoding there;
+    // the QWD command path validates the room uuid before reaching this point.
+    const rawDest = packet.destinationUuid;
+    const destUuid = rawDest instanceof TgcUuid ? rawDest : new TgcUuid(rawDest != null ? rawDest : Buffer.alloc(16));
     destUuid.encode(writer);
   }
 

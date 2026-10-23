@@ -1,4 +1,4 @@
-import { ProtocolError } from '../../utils/errors.js';
+import { ProtocolError } from '../../errors.js';
 
 export class BinaryReader {
   constructor(buffer) {

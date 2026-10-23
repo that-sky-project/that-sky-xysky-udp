@@ -69,7 +69,6 @@ npm start
 
 ```text
 ENet UDP: 0.0.0.0:19133
-HTTP TCP: 0.0.0.0:19133
 ```
 
 TCP 与 UDP 可以使用相同端口号。开发模式（自动重载）：`npm run dev`。
@@ -97,10 +96,6 @@ room:
   move_timeout_ms: 20000  # 卡在 MOVING 的会话超过该时间后恢复为 ACTIVE（毫秒）
   move_targets: []        # 可选的静态迁移目标
 
-http:
-  host: 0.0.0.0           # HTTP 状态/指标绑定地址
-  port: 19133             # HTTP TCP 端口
-
 qwd:
   url: ""                 # 为空 => 独立运行。填写 wss:// 地址即可接入 QWD 管理器。
 ```
@@ -120,8 +115,6 @@ qwd:
 | `room.bad_packet_limit` | `8` | 关闭会话前允许的坏包次数 |
 | `room.move_timeout_ms` | `20000` | MOVING 卡住超过该时间后恢复为 ACTIVE |
 | `room.move_targets` | `[]` | 静态迁移目标（数组） |
-| `http.host` | `0.0.0.0` | HTTP 监听地址 |
-| `http.port` | `19133` | HTTP TCP 端口 |
 | `qwd.url` | `""` | QWD WebSocket 地址。**为空 = 独立运行，不连接管理器。** |
 
 ### `room.public_uri`
@@ -146,11 +139,6 @@ stateDiagram-v2
     ACTIVE --> CLOSED: disconnect
     MOVING --> CLOSED: move disconnect
 ```
-
-## HTTP 状态与指标
-
-HTTP 服务是只读且无鉴权的——请放在可信网络内或反向代理之后。接口包括 `/health`、`/rooms`、
-`/players`、`/levels`、`/move/targets`、`/move/pending`，以及 `/metrics`（Prometheus 格式）。
 
 ## 许可证
 

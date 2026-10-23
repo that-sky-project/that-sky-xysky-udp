@@ -1,6 +1,6 @@
-import { SnapshotReader } from '../protocol/snapshot/SnapshotReader.js';
-import { SnapshotWriter } from '../protocol/snapshot/SnapshotWriter.js';
-import { decodePlayerState } from '../protocol/types/PlayerState.js';
+import { SnapshotReader } from '../../protocol/snapshot/SnapshotReader.js';
+import { SnapshotWriter } from '../../protocol/snapshot/SnapshotWriter.js';
+import { decodePlayerState } from '../../protocol/types/PlayerState.js';
 
 export class PlayerSnapshotState {
   constructor({ decodeFields = false } = {}) {

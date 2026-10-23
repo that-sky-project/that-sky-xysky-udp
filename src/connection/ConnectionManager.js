@@ -30,6 +30,15 @@ export class ConnectionManager {
     return session;
   }
 
+  // QWD can force a room id change after a conflict. Existing sessions (and
+  // the players that report roomId through their session) must follow.
+  setRoomId(roomId) {
+    this.roomId = roomId;
+    for (const session of this.sessions.values()) {
+      session.roomId = roomId;
+    }
+  }
+
   list() {
     return Array.from(this.sessions.values());
   }

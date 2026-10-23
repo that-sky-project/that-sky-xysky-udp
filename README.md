@@ -79,7 +79,6 @@ With the default `config.yml` the node listens on:
 
 ```text
 ENet UDP: 0.0.0.0:19133
-HTTP TCP: 0.0.0.0:19133
 ```
 
 TCP and UDP may share the same port number. Development mode with auto-reload: `npm run dev`.
@@ -107,10 +106,6 @@ room:
   move_timeout_ms: 20000  # revert a stuck MOVING session to ACTIVE after this (ms)
   move_targets: []        # optional static migration targets
 
-http:
-  host: 0.0.0.0           # HTTP status/metrics bind address
-  port: 19133             # HTTP TCP port
-
 qwd:
   url: ""                 # EMPTY => standalone. Set a wss:// address to use a QWD manager.
 ```
@@ -130,8 +125,6 @@ qwd:
 | `room.bad_packet_limit` | `8` | Malformed-packet limit before the session is closed |
 | `room.move_timeout_ms` | `20000` | Revert a session stuck in MOVING back to ACTIVE after this |
 | `room.move_targets` | `[]` | Static migration targets (JSON/YAML array) |
-| `http.host` | `0.0.0.0` | HTTP listen address |
-| `http.port` | `19133` | HTTP TCP port |
 | `qwd.url` | `""` | QWD WebSocket URL. **Empty = standalone, no manager connection.** |
 
 ### `room.public_uri`
@@ -159,12 +152,6 @@ stateDiagram-v2
     ACTIVE --> CLOSED: disconnect
     MOVING --> CLOSED: move disconnect
 ```
-
-## HTTP Status & Metrics
-
-The HTTP server is read-only and unauthenticated — keep it on a trusted network or behind a
-proxy. Endpoints include `/health`, `/rooms`, `/players`, `/levels`, `/move/targets`,
-`/move/pending`, and `/metrics` (Prometheus format).
 
 ## License
 

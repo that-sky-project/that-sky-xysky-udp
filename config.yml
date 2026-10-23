@@ -18,10 +18,6 @@ room:
   move_timeout_ms: 20000
   move_targets: []
 
-http:
-  host: 0.0.0.0
-  port: 19133
-
 # Room Authority / Room Manager (QWD) link.
 # Leave url empty to run this node standalone as a single 8-player room:
 # it will NOT connect to or register with any manager.

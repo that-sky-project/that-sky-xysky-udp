@@ -3,13 +3,6 @@ import { GIFT_CLASS_ID, GiftTypeFlag, patchGiftReceiverUuid } from './handlers/g
 
 const GIFT_KEY = classIdKey(GIFT_CLASS_ID);
 
-/**
- * NetRpcRouter — 注册式 NetRpc 消息路由器。
- *
- * 每个 NetRpc 消息由 class_id（7字节头，转为 hex key）+ type_flag 唯一标识。
- * handler 签名: (rpcData, decoded, context) => Buffer | null
- *   - 返回修改后的 Buffer，或 null/undefined 表示原样转发
- */
 export class NetRpcRouter {
   constructor() {
     this._handlers = new Map();

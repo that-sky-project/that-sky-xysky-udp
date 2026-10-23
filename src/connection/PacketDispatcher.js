@@ -1,5 +1,5 @@
 import { PacketIds } from '../protocol/PacketIds.js';
-import { ConnectionState } from './ConnectionSession.js';
+import { ConnectionState } from './states.js';
 
 const ALLOWED_BY_STATE = Object.freeze({
   [ConnectionState.CONNECTED]: new Set(),
