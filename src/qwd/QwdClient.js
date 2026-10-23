@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
+import { createRoomId } from '../domain/RoomId.js';
 import { ErrorCode } from './errorCodes.js';
 
 const QUEUE_LIMIT = 256;
@@ -22,6 +23,12 @@ export class QwdClient {
   constructor({ url, room, logger, onCommand, onRoomIdConflict, onConnected, onTransportDropped, snapshot }) {
     this.url = url;
     this.room = room;
+    // Stable identity of this node process across reconnects so the manager can
+    // restore its rooms within the grace window. Deliberately NOT the room id:
+    // room ids are short numbers, can collide between nodes, and are
+    // regenerated after a room.id_conflict — none of which may change the
+    // identity of a live control connection.
+    this.nodeId = randomUUID();
     this.logger = logger;
     this.onCommand = onCommand;
     this.onRoomIdConflict = onRoomIdConflict;
@@ -42,6 +49,8 @@ export class QwdClient {
     this.lastActivityAt = 0;
     this.connectedAt = 0;
     this.livenessTimer = null;
+    // Rate limit for "offline, frames are queued" warnings.
+    this.lastOfflineWarnAt = 0;
   }
 
   start() {
@@ -71,6 +80,14 @@ export class QwdClient {
     // A socket in CLOSING/CLOSED swallows writes, so treat it as offline and
     // let the queue keep the newest state instead of losing the frame.
     if (!this.connected || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      // The manager cannot see anything published while we are offline. Warn
+      // once per window so this shows up next to the manager's resync logs.
+      // Skip it for a standalone node (no qwd.url) and while shutting down.
+      const at = Date.now();
+      if (this.url && !this.stopped && at - this.lastOfflineWarnAt >= 30_000) {
+        this.lastOfflineWarnAt = at;
+        this.logger.warn?.({ roomId: this.room.id, event, queued: this.queue.length }, 'qwd offline; frames are queued and the manager will be resynced on reconnect');
+      }
       if (event === 'room.telemetry') {
         const index = this.queue.findIndex(entry => entry.startsWith('{"v":1,"event":"room.telemetry"'));
         if (index >= 0) {
@@ -134,6 +151,7 @@ export class QwdClient {
       // qwd accepts node connections on the root WebSocket endpoint.
       endpoint.pathname = '/';
       endpoint.searchParams.set('v', '1');
+      if (this.nodeId) endpoint.searchParams.set('node', this.nodeId);
       const socket = new WebSocket(endpoint, { handshakeTimeout: 10_000 });
       this.socket = socket;
       socket.on('open', () => {
@@ -147,7 +165,11 @@ export class QwdClient {
         this.logger.info?.({ endpoint: endpoint.toString(), roomId: this.room.id }, 'qwd websocket connected');
         // Events queued while qwd was unavailable are stale snapshots. Drop
         // them and replay the node's current authoritative state instead.
+        const discardedQueuedFrames = this.queue.length;
         this.queue.length = 0;
+        if (discardedQueuedFrames > 0) {
+          this.logger.warn?.({ roomId: this.room.id, discardedQueuedFrames }, 'qwd reconnected; discarded queued frames, full resync follows');
+        }
         this.publish('node.ready', { ...this.occupancy(), timestamp: Date.now() });
         // Report the authoritative occupancy, not 0: a reconnect while players
         // are present must not make the manager see an empty room and start
@@ -171,7 +193,7 @@ export class QwdClient {
           if (!command?.cmd) return;
           if (command.cmd === 'room.id_conflict') {
             const previousRoomId = this.room.id;
-            this.room.id = randomUUID();
+            this.room.id = createRoomId();
             this.logger.warn?.({ previousRoomId, roomId: this.room.id }, 'qwd room id conflict; regenerated room id');
             this.onRoomIdConflict?.(this.room.id, previousRoomId);
             if (this.connected) {

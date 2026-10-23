@@ -19,12 +19,37 @@ import { TickLoop } from './TickLoop.js';
 import { AuthorityElectionGate } from './AuthorityElectionCoordinator.js';
 
 // A full telemetry frame is re-sent at least this often even when nothing
-// changed. Besides re-syncing a manager whose delta base drifted, this is the
-// idle liveness signal the manager's planner runs on: planning is triggered by
-// room telemetry, so a room whose players stand still would otherwise never be
-// reconsidered for a same-level merge.
+// changed. Besides re-syncing a manager whose delta base drifted, this bounds
+// how long a dropped delta can leave the manager's room version frozen (a
+// frozen version makes every later move.prepare look like a STALE_PLAN).
 const TELEMETRY_FULL_RESYNC_FRAMES = 30;
-const TELEMETRY_FULL_RESYNC_MS = 30_000;
+const TELEMETRY_FULL_RESYNC_MS = 10_000;
+// An unchanged player is re-sent at least this often. Without it a room whose
+// players stand still publishes nothing between full resyncs: the manager ages
+// the whole node out of listHealthy (nodes.stale_ms) and freezes stateAt, while
+// an empty room — which always sends a full frame — stays visible. Allocation
+// then systematically prefers empty rooms and freshness signals go stale.
+const TELEMETRY_PLAYER_KEEPALIVE_MS = 2_000;
+
+/**
+ * MoveGame carries the destination room as a 16-byte TgcUuid, while QWD only
+ * knows room ids. Room ids are 8-digit decimal numbers, so map the number into
+ * the last 12 hex digits of a fixed uuid. Deterministic: every node derives the
+ * same value for the same room. UUID-shaped ids (an older node build or an
+ * explicit toRoomUuid) pass through unchanged, which keeps mixed-version
+ * clusters working during a rollout.
+ */
+export function destinationUuid(roomId) {
+  if (roomId === undefined || roomId === null) return undefined;
+  const value = String(roomId);
+  if (TgcUuid.isText(value)) return value;
+  // Only a plain decimal id is accepted; Number('') / Number('0x10') / 1e3
+  // must not silently turn into a uuid.
+  if (!/^\d{1,15}$/.test(value)) return undefined;
+  const numeric = Number(value);
+  if (!Number.isSafeInteger(numeric) || numeric > 0xffffffffffff) return undefined;
+  return `00000000-0000-4000-8000-${numeric.toString(16).padStart(12, '0')}`;
+}
 
 export class RoomServer {
   constructor({ config, logger, metrics }) {
@@ -67,6 +92,9 @@ export class RoomServer {
     this.lastTelemetrySeqSent = 0;
     this.lastFullTelemetrySeq = 0;
     this.lastFullTelemetryAt = 0;
+    // playerId -> when this node last put the player on the wire. Drives the
+    // per-player keepalive that keeps idle rooms visible to the manager.
+    this.lastTelemetrySentAt = new Map();
     this.qwdReservations = new Map();
     this.migrationRosters = new Map();
     this.authorityElectionGate = new AuthorityElectionGate();
@@ -208,7 +236,8 @@ export class RoomServer {
   }
 
   reannounceQwdState() {
-    for (const player of this.players.listActive()) {
+    const active = this.players.listActive();
+    for (const player of active) {
       this.qwd.publish('player.join', {
         roomId: this.config.id,
         player: {
@@ -217,6 +246,17 @@ export class RoomServer {
         }
       });
     }
+    // The manager may have lost our delta base while the socket was down (and a
+    // restarted manager has no roster at all), so the first frame after a
+    // reconnect must be a full snapshot rather than a "nothing changed" no-op.
+    // Log it so it lines up with the manager's "telemetry resynchronized" line.
+    this.logger.info({
+      roomId: this.config.id,
+      players: active.length,
+      lastSeqSent: this.lastTelemetrySeqSent,
+      lastFullSeq: this.lastFullTelemetrySeq
+    }, 'qwd connected; forcing full telemetry resync');
+    this.lastTelemetryRoster = null;
     this.lastQwdTelemetryAt = 0;
     this.publishQwdTelemetry();
   }
@@ -236,6 +276,10 @@ export class RoomServer {
 
   onTick() {
     this.expireMigrationRosters();
+    // Reservations must expire on their own: when no command arrives for a
+    // while (the usual idle state), the deadline still has to be honoured so
+    // capacity is not held forever and the manager learns about it promptly.
+    this.expireQwdReservations();
     this.moveService.expireStuckMoves();
     this.metrics.connectedPeers.set(this.sessions.size);
     this.metrics.onlinePlayers.set(this.players.size);
@@ -376,14 +420,26 @@ export class RoomServer {
       if (!player || !command.data?.udpHost) return fail(ErrorCode.NOT_FOUND, 'source player not found', { playerId: id });
       group.push(player);
     }
-    // MoveGame.destinationUuid must identify the destination room. QWD addresses
-    // rooms by id, and node room ids are UUIDs, so the id is the UUID unless the
-    // manager supplies a distinct one.
-    const toRoomUuid = command.data.toRoomUuid ?? command.data.toRoomId;
-    if (!TgcUuid.isText(toRoomUuid)) return fail(ErrorCode.BAD_REQUEST, 'invalid destination room uuid', { toRoomId: command.data.toRoomId });
+    // MoveGame.destinationUuid must identify the destination room; QWD only
+    // sends the room id. Derive the uuid from the numeric id unless the manager
+    // supplied a real one.
+    const toRoomUuid = TgcUuid.isText(command.data.toRoomUuid)
+      ? command.data.toRoomUuid
+      : destinationUuid(command.data.toRoomId);
+    if (!toRoomUuid) return fail(ErrorCode.BAD_REQUEST, 'invalid destination room uuid', { toRoomId: command.data.toRoomId });
     const target = { id: command.data.toRoomId, udpHost: command.data.udpHost, udpPort: command.data.udpPort, uuid: toRoomUuid, address: { host: command.data.udpHost, port: command.data.udpPort, toApi() { return { host: this.host, port: this.port }; } } };
     const result = this.moveService.movePlayersAtomic(group, target, { moveId: command.data.moveId });
-    this.qwd.publish('move.result', { roomId: this.config.id, moveId: command.data.moveId, accepted: result.accepted, reason: result.reason });
+    // Carry the per-player outcome: without it the manager can only tell that
+    // the group as a whole was not accepted and marks every player failed, even
+    // when most of them actually migrated.
+    this.qwd.publish('move.result', {
+      roomId: this.config.id,
+      moveId: command.data.moveId,
+      accepted: result.accepted,
+      reason: result.reason,
+      movedPlayerIds: result.movedPlayerIds ?? [],
+      failedPlayerIds: result.failedPlayerIds ?? []
+    });
     // Was `409`, which the manager cannot match against its ErrorCode enum and
     // therefore reports as an unknown failure. CONFLICT (4009) carries the
     // "move could not be applied" meaning the manager expects.
@@ -490,13 +546,19 @@ export class RoomServer {
       this.lastFullTelemetrySeq = seq;
       this.lastFullTelemetryAt = now;
       this.lastTelemetrySeqSent = seq;
+      this.lastTelemetrySentAt = new Map(players.map(player => [player.playerId, now]));
       return;
     }
 
     const changed = [];
     for (const [playerId, player] of current) {
       const before = previous.get(playerId);
-      if (!before || !this.sameTelemetry(before, player)) changed.push(player);
+      const sentAt = this.lastTelemetrySentAt.get(playerId) ?? 0;
+      // Keepalive: an idle player is re-sent even though nothing observable
+      // changed, so the manager keeps a fresh stateAt and a live node.
+      if (!before || !this.sameTelemetry(before, player) || now - sentAt >= TELEMETRY_PLAYER_KEEPALIVE_MS) {
+        changed.push(player);
+      }
     }
     const removed = [];
     for (const playerId of previous.keys()) {
@@ -515,6 +577,8 @@ export class RoomServer {
     this.qwd.publishTelemetry(changed, seq, { kind: 'delta', baseSeq: this.lastTelemetrySeqSent, removedPlayers: removed });
     this.lastTelemetryRoster = current;
     this.lastTelemetrySeqSent = seq;
+    for (const player of changed) this.lastTelemetrySentAt.set(player.playerId, now);
+    for (const playerId of removed) this.lastTelemetrySentAt.delete(playerId);
   }
 
   sameTelemetry(a, b) {

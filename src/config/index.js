@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createRoomId } from '../domain/RoomId.js';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
@@ -40,7 +40,7 @@ export function loadConfig(configFile = path.resolve(process.cwd(), 'config.yml'
     : configFile;
   const parsed = configSchema.parse(source ?? {});
   const publicEndpoint = parsePublicUri(parsed.room.public_uri);
-  const roomId = randomUUID();
+  const roomId = createRoomId();
 
   return {
     env: parsed.env,
