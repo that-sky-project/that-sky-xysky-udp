@@ -18,6 +18,14 @@ import { PeerEventHandler } from './PeerEventHandler.js';
 import { TickLoop } from './TickLoop.js';
 import { AuthorityElectionGate } from './AuthorityElectionCoordinator.js';
 
+// A full telemetry frame is re-sent at least this often even when nothing
+// changed. Besides re-syncing a manager whose delta base drifted, this is the
+// idle liveness signal the manager's planner runs on: planning is triggered by
+// room telemetry, so a room whose players stand still would otherwise never be
+// reconsidered for a same-level merge.
+const TELEMETRY_FULL_RESYNC_FRAMES = 30;
+const TELEMETRY_FULL_RESYNC_MS = 30_000;
+
 export class RoomServer {
   constructor({ config, logger, metrics }) {
     this.config = config;
@@ -454,11 +462,17 @@ export class RoomServer {
         return peer ? [peer.uuid.toString(), Math.max(0, Math.min(1, Number(entry.value) / 255))] : null;
       }).filter(Boolean))
     }));
-    const seq = ++this.telemetrySeq;
+    // Only advance the sequence when a frame is actually published. The
+    // manager derives the room version (and therefore `expectedVersion` in
+    // move.prepare) from the last seq it received, so a counter that keeps
+    // ticking through idle ticks makes every later move look stale and the
+    // node rejects valid migrations with STALE_PLAN.
+    const seq = this.telemetrySeq + 1;
 
     // Differential telemetry: after the first snapshot only send players whose
-    // observable state changed, plus the ids that left. Falls back to a full
-    // snapshot every FULL_RESYNC_EVERY frames so a desynced manager self-heals.
+    // observable state changed, plus the ids that left. A full snapshot is
+    // re-sent every TELEMETRY_FULL_RESYNC_FRAMES frames or every
+    // TELEMETRY_FULL_RESYNC_MS, whichever comes first.
     const previous = this.lastTelemetryRoster;
     const current = new Map();
     for (const player of players) current.set(player.playerId, player);
@@ -466,10 +480,11 @@ export class RoomServer {
     const canDelta =
       previous !== null &&
       previous.size > 0 &&
-      seq - this.lastFullTelemetrySeq < 30 &&
-      now - this.lastFullTelemetryAt < 30_000;
+      seq - this.lastFullTelemetrySeq < TELEMETRY_FULL_RESYNC_FRAMES &&
+      now - this.lastFullTelemetryAt < TELEMETRY_FULL_RESYNC_MS;
 
     if (!canDelta) {
+      this.telemetrySeq = seq;
       this.qwd.publishTelemetry(players, seq);
       this.lastTelemetryRoster = current;
       this.lastFullTelemetrySeq = seq;
@@ -489,13 +504,14 @@ export class RoomServer {
     }
 
     if (changed.length === 0 && removed.length === 0) {
-      // Nothing observable changed: skip the frame entirely. baseSeq still
-      // advances because the manager treats an unseen seq as a gap and will
-      // wait for the next full snapshot, which is what we want.
+      // Nothing observable changed, so no frame is published and the sequence
+      // must not advance: the manager's cached room version has to stay equal
+      // to the last seq it actually received.
       this.lastTelemetryRoster = current;
       return;
     }
 
+    this.telemetrySeq = seq;
     this.qwd.publishTelemetry(changed, seq, { kind: 'delta', baseSeq: this.lastTelemetrySeqSent, removedPlayers: removed });
     this.lastTelemetryRoster = current;
     this.lastTelemetrySeqSent = seq;
