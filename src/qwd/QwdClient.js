@@ -51,11 +51,18 @@ export class QwdClient {
     this.livenessTimer = null;
     // Rate limit for "offline, frames are queued" warnings.
     this.lastOfflineWarnAt = 0;
+    // Startup races (the first tick publishes before the handshake completes)
+    // must not look like a degraded link. Only warn after a real disconnect, or
+    // when the very first connection is still missing after a grace period.
+    this.startedAt = 0;
+    this.everConnected = false;
+    this.offlineLogged = false;
   }
 
   start() {
     if (!this.url) return;
     this.stopped = false;
+    this.startedAt = Date.now();
     this.connect();
   }
 
@@ -81,12 +88,17 @@ export class QwdClient {
     // let the queue keep the newest state instead of losing the frame.
     if (!this.connected || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
       // The manager cannot see anything published while we are offline. Warn
-      // once per window so this shows up next to the manager's resync logs.
-      // Skip it for a standalone node (no qwd.url) and while shutting down.
+      // once per window so this shows up next to the manager's resync logs, but
+      // stay quiet during the initial handshake (the first tick usually beats
+      // the WebSocket open by a few milliseconds).
       const at = Date.now();
-      if (this.url && !this.stopped && at - this.lastOfflineWarnAt >= 30_000) {
+      const worthWarning = this.everConnected || (this.startedAt > 0 && at - this.startedAt >= 10_000);
+      if (this.url && !this.stopped && worthWarning && at - this.lastOfflineWarnAt >= 30_000) {
         this.lastOfflineWarnAt = at;
         this.logger.warn?.({ roomId: this.room.id, event, queued: this.queue.length }, 'qwd offline; frames are queued and the manager will be resynced on reconnect');
+      } else if (!this.everConnected && !this.offlineLogged) {
+        this.offlineLogged = true;
+        this.logger.debug?.({ roomId: this.room.id, event }, 'waiting for the qwd connection');
       }
       if (event === 'room.telemetry') {
         const index = this.queue.findIndex(entry => entry.startsWith('{"v":1,"event":"room.telemetry"'));
@@ -166,10 +178,15 @@ export class QwdClient {
         // Events queued while qwd was unavailable are stale snapshots. Drop
         // them and replay the node's current authoritative state instead.
         const discardedQueuedFrames = this.queue.length;
+        const reconnected = this.everConnected;
         this.queue.length = 0;
         if (discardedQueuedFrames > 0) {
-          this.logger.warn?.({ roomId: this.room.id, discardedQueuedFrames }, 'qwd reconnected; discarded queued frames, full resync follows');
+          const fields = { roomId: this.room.id, discardedQueuedFrames };
+          if (reconnected) this.logger.warn?.(fields, 'qwd reconnected; discarded queued frames, full resync follows');
+          else this.logger.debug?.(fields, 'discarded frames queued before the first connection; full resync follows');
         }
+        this.everConnected = true;
+        this.offlineLogged = false;
         this.publish('node.ready', { ...this.occupancy(), timestamp: Date.now() });
         // Report the authoritative occupancy, not 0: a reconnect while players
         // are present must not make the manager see an empty room and start
