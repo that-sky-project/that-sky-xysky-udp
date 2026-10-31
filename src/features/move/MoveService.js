@@ -1,6 +1,16 @@
 import { PacketIds } from '../../protocol/PacketIds.js';
 import { ConnectionState } from '../../connection/states.js';
 
+/**
+ * Completed moves kept for diagnostics.
+ *
+ * `moveHistory` exists only for `listHistory`, which no production path reads,
+ * so it is a bounded ring: an unbounded Map here leaked one entry per migration
+ * for the lifetime of the process.
+ */
+const MOVE_HISTORY_LIMIT = 200;
+const MOVE_HISTORY_TTL_MS = 10 * 60 * 1000;
+
 export class MoveService {
   constructor({ players, rooms, broadcaster, transport, levelService, logger, onMoveResult, moveTimeoutMs = 20000 }) {
     this.players = players;
@@ -13,6 +23,24 @@ export class MoveService {
     this.moveTimeoutMs = moveTimeoutMs;
     this.pendingMoves = new Map();
     this.moveHistory = new Map();
+  }
+
+  recordHistory(moveId, entry) {
+    this.moveHistory.set(moveId, entry);
+    if (this.moveHistory.size <= MOVE_HISTORY_LIMIT) return;
+
+    const cutoff = Date.now() - MOVE_HISTORY_TTL_MS;
+    for (const [id, move] of this.moveHistory) {
+      if (this.moveHistory.size <= MOVE_HISTORY_LIMIT) break;
+      const at = move.abortedAt ?? move.cancelledAt ?? move.acknowledgedAt ?? move.createdAt ?? 0;
+      if (at >= cutoff && this.moveHistory.size <= MOVE_HISTORY_LIMIT) break;
+      this.moveHistory.delete(id);
+    }
+    while (this.moveHistory.size > MOVE_HISTORY_LIMIT) {
+      const oldest = this.moveHistory.keys().next();
+      if (oldest.done) break;
+      this.moveHistory.delete(oldest.value);
+    }
   }
 
   movePlayer(player, targetRoom, { disconnect = true } = {}) {
@@ -60,9 +88,6 @@ export class MoveService {
       target: targetRoom.address.toApi()
     }, 'player move requested');
 
-    // The client owns the old UDP connection lifecycle after MoveGame. The
-    // server keeps the session in MOVING until the client's actual disconnect,
-    // which lets the target JoinGame complete without a forced server kick.
     // if (disconnect) {
     //   this.transport.disconnect(player.session.peerId, 'later', 2);
     //}
@@ -88,9 +113,7 @@ export class MoveService {
         this.pendingMoves.set(pending.moveId, pending);
         prepared.push(pending);
       }
-      // Every moving client receives the same complete group list. The native
-      // split flow is transactional: a partial publication would leave some
-      // clients with a roster that can never be completed at the destination.
+  
       for (const player of eligible) {
         const pending = prepared.find(item => item.playerId === player.id);
         if (!pending) continue;
@@ -110,7 +133,7 @@ export class MoveService {
     } catch (error) {
       for (const pending of prepared) {
         this.pendingMoves.delete(pending.moveId);
-        this.moveHistory.set(pending.moveId, {
+        this.recordHistory(pending.moveId, {
           ...pending,
           status: 'cancelled',
           cancelReason: 2,
@@ -131,10 +154,7 @@ export class MoveService {
       player.session.transition(ConnectionState.MOVING);
       this.levelService?.releaseAuthority(player, 'players_moving');
     }
-    // if (disconnect) for (const player of moved) this.transport.disconnect(player.session.peerId, 'later', 2);
-    // Do not force-disconnect the source peers. Each client closes its old
-    // connection after processing MoveGame; PeerEventHandler then emits the
-    // authoritative player.leave event.
+
     this.logger.info({ moveId, playerIds: moved.map(player => player.id), targetRoomId: targetRoom.id }, 'atomic player move committed');
     return { accepted: moved.length > 0, moved: moved.length, failedPlayerIds: failed.map(player => player.uuid?.toString?.()).filter(Boolean), movedPlayerIds: moved.map(player => player.uuid?.toString?.()).filter(Boolean) };
   }
@@ -198,7 +218,7 @@ export class MoveService {
           cancelledAt: Date.now()
         };
         this.pendingMoves.delete(moveId);
-        this.moveHistory.set(moveId, updated);
+        this.recordHistory(moveId, updated);
       }
     }
 
@@ -221,7 +241,7 @@ export class MoveService {
         acknowledgedAt: Date.now()
       };
       this.pendingMoves.delete(matched.moveId);
-      this.moveHistory.set(matched.moveId, updated);
+      this.recordHistory(matched.moveId, updated);
       if (result !== 0 && session.state === ConnectionState.MOVING) {
         session.transition(ConnectionState.ACTIVE);
         this.levelService?.rebalanceAuthority(player.levelId);
@@ -243,12 +263,8 @@ export class MoveService {
       const player = this.players.list().find(item => item.id === move.playerId);
       if (player) {
         if (move.transactionId) {
-          // QWD initiated this migration: the client was told to join the
-          // destination. A source session that lingers past the timeout means
-          // the player may be reported by two rooms at once, so drop the old
-          // peer instead of reverting it to ACTIVE here.
           this.pendingMoves.delete(move.moveId);
-          this.moveHistory.set(move.moveId, { ...move, status: 'aborted', abortReason: 'move_timeout', abortedAt: now });
+          this.recordHistory(move.moveId, { ...move, status: 'aborted', abortReason: 'move_timeout', abortedAt: now });
           this.logger.warn({ moveId: move.moveId, playerId: move.playerId }, 'qwd move timed out; disconnecting lingering source session');
           try {
             this.transport.disconnect(player.session.peerId, 'now');
@@ -256,15 +272,12 @@ export class MoveService {
             this.logger.warn({ err: error, moveId: move.moveId, playerId: move.playerId }, 'failed to disconnect lingering source session');
           }
         } else {
-          // Client neither completed the move nor disconnected in time. Revert
-          // it to ACTIVE so the slot and authority are reclaimed instead of
-          // leaking.
           this.cancelPlayerMove(player, 2);
           this.logger.warn({ moveId: move.moveId, playerId: move.playerId }, 'move timed out; reverted session to active');
         }
       } else {
         this.pendingMoves.delete(move.moveId);
-        this.moveHistory.set(move.moveId, { ...move, status: 'aborted', abortReason: 'move_timeout', abortedAt: now });
+        this.recordHistory(move.moveId, { ...move, status: 'aborted', abortReason: 'move_timeout', abortedAt: now });
       }
       expired += 1;
     }
@@ -276,7 +289,7 @@ export class MoveService {
     for (const [moveId, move] of this.pendingMoves.entries()) {
       if (move.playerId !== player.id) continue;
       this.pendingMoves.delete(moveId);
-      this.moveHistory.set(moveId, {
+      this.recordHistory(moveId, {
         ...move,
         status: 'aborted',
         abortReason: reason,

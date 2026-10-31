@@ -93,7 +93,6 @@ export class NetAddress {
     if (![0, 1, 2, 3].includes(type)) throw new ProtocolError('unsupported network address type', { type });
     writer.writeCompressed(type, 3);
     if (type === 0 || type === 3) {
-      // Address-less variants still carry the optional-port bit.
     } else if (type === 1) {
       const parts = this.host.split('.').map(Number);
       if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {

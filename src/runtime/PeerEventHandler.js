@@ -1,8 +1,9 @@
 import { PacketIds } from '../protocol/PacketIds.js';
 import { ConnectionState } from '../connection/states.js';
+import { PacketDebugLog, PacketFormatter } from '../observability/debugPackets.js';
 
 export class PeerEventHandler {
-  constructor({ config, sessions, codec, dispatcher, players, levelService, moveService, broadcaster, transport, metrics, logger, onPlayerLeft }) {
+  constructor({ config, sessions, codec, dispatcher, players, levelService, moveService, audienceService, broadcaster, transport, metrics, logger, packetDebug, onPlayerLeft }) {
     this.config = config;
     this.sessions = sessions;
     this.codec = codec;
@@ -10,11 +11,26 @@ export class PeerEventHandler {
     this.players = players;
     this.levelService = levelService;
     this.moveService = moveService;
+    this.audienceService = audienceService;
     this.broadcaster = broadcaster;
     this.transport = transport;
     this.metrics = metrics;
     this.logger = logger;
+    this.packetDebug = packetDebug ?? new PacketDebugLog({ logger });
     this.onPlayerLeft = onPlayerLeft;
+    this.inboundCounts = new Map();
+  }
+
+  /**
+   * Snapshot and clear the inbound packet counters.
+   *
+   * @returns {Record<string, number>} packet id -> count since the last call
+   */
+  takeInboundCounts() {
+    const out = {};
+    for (const [id, count] of this.inboundCounts) out[id] = count;
+    this.inboundCounts.clear();
+    return out;
   }
 
   onConnect(peerId) {
@@ -63,10 +79,6 @@ export class PeerEventHandler {
       return;
     }
 
-    // Outer id 16 (and any future unknown outer id) is a 0-byte keepalive
-    // probe in 0.35.1. IDA: Pending 0x140E85320 and Active 0x140E85480 both
-    // have no handler and just log "Unknown message:" — swallow without
-    // bad-packet penalty, token/dispatcher/metrics bypassed.
     if (packet.unknown) {
       this.logger.debug({ peerId: peerId.toString(), sessionId: session.id, channel, id: packet.id, sequence: packet.sequence }, 'ignored unknown client packet');
       return;
@@ -90,6 +102,7 @@ export class PeerEventHandler {
     }
 
     this.metrics.packets.inc({ direction: 'client', type: packet.name });
+    this.inboundCounts.set(packet.id, (this.inboundCounts.get(packet.id) ?? 0) + 1);
     this._logClientPacket(session, peerId, channel, data, packet);
     const endTimer = this.metrics.packetDuration.startTimer({ type: packet.name });
     try {
@@ -119,6 +132,7 @@ export class PeerEventHandler {
       this.onPlayerLeft?.(player);
       this.moveService?.forgetPlayerMoves(player);
       this.levelService.releaseAuthority(player);
+      this.audienceService?.forgetPlayer(player.uuid?.toString?.());
       this.broadcaster.broadcast({
         id: PacketIds.PlayerLeft,
         payload: { playerId: player.id, reason: 0 }
@@ -140,19 +154,20 @@ export class PeerEventHandler {
   }
 
   _logClientPacket(session, peerId, channel, data, packet) {
-    const logData = {
+    if (!this.packetDebug.isEnabled(packet)) return;
+
+    this.packetDebug.log('c2s', packet, {
+      peerId: peerId.toString(),
+      sessionId: session.id,
+      channel
+    });
+    this.logger.trace?.({
       peerId: peerId.toString(),
       sessionId: session.id,
       channel,
-      rawPacket: formatPacketBytes(data),
-      packet: formatPacket(packet)
-    };
-
-    if (packet.id === PacketIds.JoinGame) {
-      return;
-    }
-
-    this.logger.debug(logData, 'client packet decoded');
+      packet: packetLogFormatter.packet(packet),
+      raw: packetLogFormatter.bytes(data, { header: readClientPacketHeader(Buffer.from(data)) })
+    }, 'client packet raw');
   }
 
   _rejectSessionPacket(session, reason) {
@@ -166,6 +181,8 @@ export class PeerEventHandler {
     }
   }
 }
+
+const packetLogFormatter = new PacketFormatter();
 
 function formatPacketBytes(data) {
   const buffer = Buffer.from(data);
@@ -184,55 +201,4 @@ function readClientPacketHeader(buffer) {
     sequence: buffer.length >= 6 ? buffer.readUInt8(5) : null,
     payloadBytes: Math.max(0, buffer.length - 6)
   };
-}
-
-function formatPacket(packet) {
-  return {
-    id: packet.id,
-    name: packet.name,
-    token: packet.token,
-    sequence: packet.sequence,
-    payload: sanitizeForLog(packet.payload)
-  };
-}
-
-function sanitizeForLog(value, depth = 0) {
-  if (value === null || value === undefined) {
-    return value;
-  }
-
-  if (typeof value === 'bigint') {
-    return value.toString();
-  }
-
-  if (Buffer.isBuffer(value)) {
-    return {
-      type: 'Buffer',
-      bytes: value.length,
-      hex: value.subarray(0, 256).toString('hex'),
-      truncated: value.length > 256
-    };
-  }
-
-  if (Array.isArray(value)) {
-    return value.map(item => sanitizeForLog(item, depth + 1));
-  }
-
-  if (typeof value === 'object') {
-    if (depth >= 4) {
-      return '[max-depth]';
-    }
-
-    if (value.bytes && Buffer.isBuffer(value.bytes) && typeof value.toString === 'function') {
-      return value.toString();
-    }
-
-    const output = {};
-    for (const [key, item] of Object.entries(value)) {
-      output[key] = sanitizeForLog(item, depth + 1);
-    }
-    return output;
-  }
-
-  return value;
 }

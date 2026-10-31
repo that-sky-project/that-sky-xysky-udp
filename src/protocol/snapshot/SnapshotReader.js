@@ -1,5 +1,4 @@
 import { fnv1a8 } from './fnv1a.js';
-import { Snapshot } from './Snapshot.js';
 import { SNAPSHOT_MAX_DATA_BYTES } from './constants.js';
 
 // Wire frame layout (matches Rust colorsky SnapshotReader):

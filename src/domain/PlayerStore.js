@@ -38,8 +38,6 @@ export class PlayerStore {
   }
 
   allocateId() {
-    // Player IDs are an on-wire u8 with zero reserved.  A wrapped counter
-    // must skip IDs that are still active instead of overwriting their entry.
     const start = this.netIdCount === 0 ? 1 : this.netIdCount;
     for (let offset = 0; offset < 0xff; offset += 1) {
       const id = ((start - 1 + offset) % 0xff) + 1;
@@ -85,14 +83,16 @@ export class PlayerStore {
     return this.playersById.get(id);
   }
 
+  getByUuid(uuid) {
+    return this.playersByUuid.get(String(uuid));
+  }
+
   removeBySession(session) {
     const player = this.getBySession(session);
     if (!player) {
       return undefined;
     }
 
-    // Keep removal identity-safe.  This matters if a stale disconnect arrives
-    // after an ID/UUID has been reused by a newer player.
     if (this.playersById.get(player.id) === player) {
       this.playersById.delete(player.id);
     }

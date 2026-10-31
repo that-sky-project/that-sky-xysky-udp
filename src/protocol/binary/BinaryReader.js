@@ -163,11 +163,56 @@ export class BinaryReader {
     return value >>> 0;
   }
 
+  alignToByte() {
+    if (this.bitOffset !== 0) {
+      this.bitOffset = 0;
+      this.offset += 1;
+    }
+  }
+
+  /**
+   * Byte-aligned little-endian read — the client's `sub_1400375A0`.
+   *
+   * @param {number} bytes field width in bytes
+   */
+  readAlignedUInt(bytes) {
+    this.alignToByte();
+    if (this.remaining < bytes) {
+      throw new ProtocolError('packet buffer underflow', {
+        offset: this.offset,
+        needBytes: bytes,
+        remaining: this.remaining
+      });
+    }
+    let value = 0;
+    for (let index = 0; index < bytes; index += 1) {
+      value += this.buffer[this.offset + index] * (2 ** (8 * index));
+    }
+    this.offset += bytes;
+    return value;
+  }
+
+  readAlignedBigUInt(bytes) {
+    this.alignToByte();
+    if (this.remaining < bytes) {
+      throw new ProtocolError('packet buffer underflow', {
+        offset: this.offset,
+        needBytes: bytes,
+        remaining: this.remaining
+      });
+    }
+    let value = 0n;
+    for (let index = bytes - 1; index >= 0; index -= 1) {
+      value = (value << 8n) | BigInt(this.buffer[this.offset + index]);
+    }
+    this.offset += bytes;
+    return value;
+  }
+
   readBool() {
     return this.readBits(1) !== 0;
   }
 
-  // SerializeCompressed(max) uses the minimum fixed bit width, not a varint.
   readCompressed(max = 0xff) {
     if (!Number.isInteger(max) || max < 0 || max > 0xffffffff) {
       throw new ProtocolError('invalid compressed maximum', { max });

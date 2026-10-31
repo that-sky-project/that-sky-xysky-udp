@@ -90,10 +90,9 @@ TCP 与 UDP 可以使用相同端口号。开发模式（自动重载）：`npm 
 是唯一的配置来源。
 
 ```yaml
-env: development          # development | test | production
 logging:
   level: info             # pino 日志级别；排查协议问题用 "debug"
-  pretty: false           # 可读日志（env 为 development 时自动开启）
+  pretty: false           # 可读日志
 
 room:
   host: 0.0.0.0           # ENet UDP 绑定地址
@@ -105,7 +104,6 @@ room:
   max_packet_bytes: 16384 # 接受的最大客户端数据包字节数
   bad_packet_limit: 8     # 单连接坏包达到该次数后关闭会话
   move_timeout_ms: 20000  # 卡在 MOVING 的会话超过该时间后恢复为 ACTIVE（毫秒）
-  move_targets: []        # 可选的静态迁移目标
   player_state_decode: full  # full | basic（basic 只解析位置与速度）
 
 qwd:
@@ -114,7 +112,6 @@ qwd:
 
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `env` | `development` | 运行环境 |
 | `logging.level` | `info` | Pino 日志级别 |
 | `logging.pretty` | `false` | 可读日志（`development` 下强制开启） |
 | `room.host` | `0.0.0.0` | ENet UDP 绑定地址 |
@@ -127,7 +124,6 @@ qwd:
 | `room.bad_packet_limit` | `8` | 关闭会话前允许的坏包次数 |
 | `room.move_timeout_ms` | `20000` | MOVING 卡住超过该时间后恢复为 ACTIVE |
 | `room.player_state_decode` | `full` | `full` 解析全部 `PlayerState` 字段；`basic` 只读 `stateKind` + 位置 + 速度 |
-| `room.move_targets` | `[]` | 静态迁移目标（数组） |
 | `qwd.url` | `""` | QWD WebSocket 地址。**为空 = 独立运行，不连接管理器。** |
 
 ### `room.public_uri`

@@ -10,14 +10,6 @@ import { rpcTap, toHexPreview } from '../rpc/RpcTap.js';
 
 const DECODE_WARN_INTERVAL_MS = 30_000;
 
-/**
- * Minimal view of a state whose layout could not be decoded. `stateKind` and
- * `position` are the first two fields of every PlayerState revision we know
- * of and never move, so they survive a drift further down the record.
- *
- * `rawState` + `_originalFields` make encodePlayerState() return the original
- * bytes unchanged, which is what peer relay needs.
- */
 function partialPlayerState(raw) {
   if (!raw || raw.length < 13) return null;
   const bytes = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
@@ -29,27 +21,20 @@ function partialPlayerState(raw) {
 }
 
 export class GameMessageService {
-  constructor({ players, levels, broadcaster, logger, stateDecode = 'full' }) {
+  constructor({ players, levels, broadcaster, logger, stateDecode = 'full', packetDebug }) {
     this.players = players;
     this.levels = levels;
     this.broadcaster = broadcaster;
     this.logger = logger;
-    // "basic" keeps only stateKind/position/velocity (all migration needs);
-    // "full" parses the whole record.
+    this.packetDebug = packetDebug;
     this.stateDecode = stateDecode === 'basic' ? 'basic' : 'full';
     this.latestAcks = new Map();
-    // Decode failures repeat on every snapshot. Report each failure signature
-    // once (with the full state, so it can be fixed offline) and otherwise at
-    // most one warning per player per window.
     this.decodeWarnAt = new Map();
+    // playerId -> { decodedRef, encoded }: the last encoded PlayerState keyed
+    this.encodedStateCache = new Map();
     this.decodeDumpSignatures = new Set();
   }
 
-  /**
-   * Basic mode cannot validate the layout on its own (it stops long before the
-   * end of the record), so the first frame of every player is decoded in full
-   * to identify the client build and remembered on the player.
-   */
   decodeState(player, data) {
     if (this.stateDecode === 'basic' && player.lastStateLayout) {
       return decodePlayerStateLite(data, { layout: player.lastStateLayout });
@@ -57,11 +42,6 @@ export class GameMessageService {
     return decodePlayerState(data, { preferredLayout: player.lastStateLayout });
   }
 
-  /**
-   * A decode failure means the wire layout drifted from PlayerState.js. Keep
-   * one full state per distinct signature so the layout can be corrected
-   * offline, and stop flooding the log with the same error 10x/second.
-   */
   reportDecodeFailure(playerId, decoded, payload, error) {
     const details = error?.details ?? {};
     const signature = `${details.field ?? details.scope ?? 'unknown'}@${details.bitOffset ?? '?'}:${decoded.data.length}`;
@@ -76,8 +56,6 @@ export class GameMessageService {
     this.warn({
       playerId,
       stateBytes: decoded.data.length,
-      // 96 bytes covers the whole fixed-size header, the move block and the
-      // body count, which is where layout drift usually surfaces first.
       statePrefixHex: decoded.data.subarray(0, 96).toString('hex'),
       stateHex: shouldDump ? decoded.data.toString('hex') : undefined,
       firstByteLow3: decoded.data[0] & 7,
@@ -103,11 +81,6 @@ export class GameMessageService {
       return;
     }
 
-    // Some GameMsg variants do not carry a level generation in older clients.
-    // Do not turn an omitted field into generation zero.  When present, keep
-    // the wire's u8 semantics while rejecting non-numeric values.
-    // RpcTap: tap stale drops even when they are swallowed, so NetRpc
-    // levelChangeCount drift (social_arm/gift) can be diagnosed live.
     if (typeof payload.levelChangeCount === 'number' && Number.isFinite(payload.levelChangeCount)) {
       const incomingLvSeq = Math.trunc(payload.levelChangeCount) & 0xff;
       if (incomingLvSeq !== source.lvSeq) {
@@ -172,7 +145,6 @@ export class GameMessageService {
       });
 
       if (forwardedTo !== undefined) {
-        // forwardToLevel now returns count — tap it
         const h2 = decodeNetRpcHeader(rpcData);
         rpcTap.push({
           direction: forwardedTo > 0 ? 'S->C' : 'dropped',
@@ -216,10 +188,6 @@ export class GameMessageService {
         bytes: payload.payloadBytes?.length ?? 0,
         updatedAt: Date.now()
       };
-      this.logger.debug?.({
-        playerId: source.id,
-        payloadBytes: payload.payloadBytes?.length ?? 0
-      }, 'consumed client affinity update');
       return;
     }
 
@@ -242,16 +210,6 @@ export class GameMessageService {
 
     if (payload.type === GameMsgType.PlayerStateDelta) {
       const decoded = source.playerDelta.read(payload.snapshot, payload.payload);
-      this.logger.debug({
-        pkt: 'snap-in', dir: 'C->S', type: 'pla',
-        pid: source.id,
-        save_seq: payload.snapshot?.sequence,
-        base_seq: payload.snapshot?.base,
-        chk: payload.snapshot?.checksum,
-        payloadBytes: payload.payload?.length ?? 0,
-        ok: decoded.ok,
-        reason: decoded.ok ? undefined : decoded.reason
-      }, '[SNAP]');
       if (!decoded.ok) {
         return;
       }
@@ -260,27 +218,11 @@ export class GameMessageService {
         source.playerDelta.rawState = null;
         return;
       }
-      // Client -> server snapshots contain only PlayerState. The sender is
-      // identified by the connection. Server -> client snapshots prepend the
-      // remote PlayerId in syncPlayerStates(), as required by the client reader.
       source.playerDelta.rawState = decoded.data;
       try {
         source.playerDelta.decodedState = this.decodeState(source, decoded.data);
-        // Remember which build this client runs so later frames skip the
-        // layout that always fails for it.
         source.lastStateLayout = source.playerDelta.decodedState.layout;
-        this.logger.debug?.({
-          playerId: source.id,
-          stateBytes: decoded.data.length,
-          stateBits: source.playerDelta.decodedState.bits,
-          stateKind: source.playerDelta.decodedState.fields.stateKind,
-          position: source.playerDelta.decodedState.fields.position
-        }, 'decoded PlayerState');
       } catch (error) {
-        // The leading fields live at fixed offsets, so a layout drift deeper in
-        // the record must not cost us the telemetry position. Keep a partial
-        // view of the state and report the failure once per window instead of
-        // once per snapshot.
         source.playerDelta.decodedState = partialPlayerState(decoded.data);
         this.reportDecodeFailure(source.id, decoded, payload, error);
       }
@@ -298,26 +240,9 @@ export class GameMessageService {
       }
 
       const decoded = source.levelDelta.read(payload.snapshot, payload.payload);
-      this.logger.debug({
-        pkt: 'snap-in', dir: 'C->S', type: 'lev',
-        pid: source.id, levelId: source.levelId,
-        save_seq: payload.snapshot?.sequence,
-        base_seq: payload.snapshot?.base,
-        chk: payload.snapshot?.checksum,
-        payloadBytes: payload.payload?.length ?? 0,
-        ok: decoded.ok,
-        reason: decoded.ok ? undefined : decoded.reason
-      }, '[SNAP]');
       if (!decoded.ok) {
         return;
       }
-
-      this.logger.debug({
-        playerId: source.id,
-        levelId: source.levelId,
-        dataBytes: decoded.data?.length ?? 0,
-        dataHex: decoded.data?.toString('hex') ?? 'none'
-      }, 'received NetLevelData raw');
 
       let levelDataMsg;
       try {
@@ -361,9 +286,6 @@ export class GameMessageService {
         return;
       }
 
-      // The snapshot carries its own level id.  Do not let a stale packet from
-      // a previous level overwrite the authority cache for the sender's
-      // current level.
       if (levelDataMsg.levelId !== source.levelId) {
         this.warn({
           playerId: source.id,
@@ -388,13 +310,17 @@ export class GameMessageService {
         authorityPlayerId: source.id
       });
 
-      this.logger.debug({
-        playerId: source.id,
-        levelId,
-        packetLevelId: levelDataMsg.levelId,
-        dataBytes: decoded.data.length,
-        levelDataBytes: levelDataMsg.levelData?.length ?? 0
-      }, 'stored level data for tick sync');
+      const signature = `${levelId}:${decoded.data.length}:${levelDataMsg.levelData?.length ?? 0}`;
+      if (signature !== this.lastStoredLevelSignature) {
+        this.lastStoredLevelSignature = signature;
+        this.logger.debug({
+          playerId: source.id,
+          levelId,
+          packetLevelId: levelDataMsg.levelId,
+          dataBytes: decoded.data.length,
+          levelDataBytes: levelDataMsg.levelData?.length ?? 0
+        }, 'stored level data for tick sync');
+      }
       return;
     }
 
@@ -509,14 +435,9 @@ export class GameMessageService {
     return next;
   }
 
-  // Called by RoomServer when the server forcefully revokes a level's authority.
-  // Sends Revoke immediately followed by Elect to each player so the client resets
-  // its snapshot Reader before the new Elect keyframe arrives — guaranteed ordering
-  // within a single TCP/reliable-UDP connection.
   sendRevokeAndElect(levelId, revokedAuthority, nextAuthority, initialData, reason = 0) {
     const levelPlayers = this.activeInLevel(levelId);
     for (const target of levelPlayers) {
-      // 1. Revoke — client resets levelDelta Reader
       this.broadcaster.send(target.session, {
         id: PacketIds.GameMsg,
         payload: {
@@ -527,7 +448,6 @@ export class GameMessageService {
           reason
         }
       });
-      // 2. Elect immediately after — client processes with a fresh Reader state
       if (nextAuthority) {
         this.sendElect(target, nextAuthority, initialData);
       }
@@ -553,8 +473,6 @@ export class GameMessageService {
       this.warn({ targetPlayerId: target.id, levelId: authority?.levelId, dataBytes: levelPayload.length }, 'skipped oversized elect payload');
       return;
     }
-    // Elect is decoded by a temporary client reader initialized with the
-    // empty sequence-1 base. Keep the persistent NetLevelData stream intact.
     const electWriter = new SnapshotWriter();
     const frameBuffer = electWriter.write(levelPayload);
     const frame = frameBuffer && {
@@ -574,16 +492,18 @@ export class GameMessageService {
       return;
     }
 
-    this.logger.debug({
-      targetPlayerId: target.id,
-      authorityPlayerId: authority?.id,
-      levelId: authority?.levelId,
-      electedPlayer: authority?.id,
-      hasInitialData: levelPayload?.hasInitialData,
-      levelDataLength: levelPayload?.levelData?.length ?? 0,
-      frameSeq: frame.sequence,
-      frameBase: frame.base
-    }, 'sending NetLevelDataElect');
+    if (this.packetDebug?.isEnabled({ id: PacketIds.GameMsg, payload: { type: GameMsgType.NetLevelDataElect } })) {
+      this.logger.debug({
+        targetPlayerId: target.id,
+        authorityPlayerId: authority?.id,
+        levelId: authority?.levelId,
+        electedPlayer: authority?.id,
+        hasInitialData: levelPayload?.hasInitialData,
+        levelDataLength: levelPayload?.levelData?.length ?? 0,
+        frameSeq: frame.sequence,
+        frameBase: frame.base
+      }, 'sending NetLevelDataElect');
+    }
 
     this.broadcaster.send(target.session, {
       id: PacketIds.GameMsg,
@@ -599,6 +519,7 @@ export class GameMessageService {
         payload: frame.payload
       }
     });
+
   }
 
   forwardToLevel(source, sourceSession, payload) {
@@ -637,7 +558,7 @@ export class GameMessageService {
       const outgoing = encodeNetLevelDataMsg({
         ...levelData,
         electedPlayer: authority.id,
-        levelId: authority.levelId,
+        levelId,
         hasInitialData: (levelData.payload?.length ?? 0) > 0,
         levelData: levelData.payload ?? Buffer.alloc(0)
       });
@@ -646,15 +567,6 @@ export class GameMessageService {
       const frame = target.levelDelta.write(outgoing);
       if (!frame) continue;
 
-      this.logger.debug?.({
-        pkt: 'snap-out', dir: 'S->C', type: 'lev',
-        pid: target.id, levelId,
-        save_seq: frame.sequence,
-        base_seq: frame.base,
-        chk: frame.checksum,
-        payloadBytes: frame.payload.length,
-        dataBytes: outgoing.length
-      }, '[SNAP]');
 
       this.broadcaster.send(target.session, {
         id: PacketIds.GameMsg,
@@ -679,24 +591,25 @@ export class GameMessageService {
       return;
     }
 
-    // A peer's wire entry ([id:u8][len:u32][state]) is identical for every
-    // target, so build it once per tick instead of re-serializing each state
-    // for each of the other players.
     const entries = [];
     for (const peer of activePlayers) {
       let raw = peer.playerDelta.rawState;
-      // A minimal (basic mode) or partial view holds no complete field set, so
-      // relay the bytes the client actually sent instead of re-encoding them.
       const decoded = peer.playerDelta.decodedState;
       if (decoded && !decoded.minimal && !decoded.partial) {
-        try {
-          raw = encodePlayerState(peer.playerDelta.decodedState);
-        } catch (error) {
-          this.warn({
-            sourcePlayerId: peer.id,
-            levelId: peer.levelId,
-            error: error?.message
-          }, 'PlayerState field serialization failed; relaying raw state');
+        const cached = this.encodedStateCache.get(peer.id);
+        if (cached && cached.decodedRef === decoded) {
+          raw = cached.encoded;
+        } else {
+          try {
+            raw = encodePlayerState(decoded);
+            this.encodedStateCache.set(peer.id, { decodedRef: decoded, encoded: raw });
+          } catch (error) {
+            this.warn({
+              sourcePlayerId: peer.id,
+              levelId: peer.levelId,
+              error: error?.message
+            }, 'PlayerState field serialization failed; relaying raw state');
+          }
         }
       }
       if (!raw || raw.length === 0) continue;
@@ -720,16 +633,6 @@ export class GameMessageService {
         if (batch.length === 0) return;
         const frame = target.playerDelta.write(Buffer.concat(batch.map(item => item.entry), batchBytes));
         if (frame) {
-          this.logger.debug?.({
-            pkt: 'snap-out', dir: 'S->C', type: 'pla',
-            pid: target.id,
-            save_seq: frame.sequence,
-            base_seq: frame.base,
-            chk: frame.checksum,
-            payloadBytes: frame.payload.length,
-            dataBytes: batchBytes,
-            players: batch.map(item => item.peer.id)
-          }, '[SNAP]');
           this.broadcaster.send(target.session, {
             id: PacketIds.GameMsg,
             payload: {

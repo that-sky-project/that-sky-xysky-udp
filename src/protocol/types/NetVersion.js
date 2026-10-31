@@ -4,7 +4,7 @@ export class NetVersion {
   }
 
   get levelHash() {
-    return this.values[2] ?? 0;
+    return this.values[0] ?? 0;
   }
 
   static decode(reader) {

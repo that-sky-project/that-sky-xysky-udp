@@ -1,8 +1,9 @@
 import { createRoomId } from '../domain/RoomId.js';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { parse as parseYaml } from 'yaml';
+import { parseChannelSwitches, parsePacketSwitches } from '../observability/debugPackets.js';
 
 const numberFrom = (fallback) => z.coerce.number().int().positive().default(fallback);
 const booleanFrom = (fallback) => z.preprocess(value => {
@@ -13,7 +14,6 @@ const booleanFrom = (fallback) => z.preprocess(value => {
 }, z.boolean().default(fallback));
 
 const configSchema = z.object({
-  env: z.enum(['development', 'test', 'production']).default('development'),
   logging: z.object({ level: z.string().default('info'), pretty: z.boolean().default(false) }).default({}),
   room: z.object({
     host: z.string().default('0.0.0.0'),
@@ -25,12 +25,8 @@ const configSchema = z.object({
     max_packet_bytes: numberFrom(16384),
     bad_packet_limit: numberFrom(8),
     move_timeout_ms: numberFrom(20000),
-    // "full" parses every PlayerState field; "basic" stops after stateKind,
-    // position and the move block (velocity), which is all room migration uses.
-    player_state_decode: z.enum(['full', 'basic']).default('full'),
-    move_targets: z.array(z.record(z.unknown())).default([])
+    player_state_decode: z.enum(['full', 'basic']).default('full')
   }).default({}),
-  // Empty url => standalone node, no manager connection. See config.yml.
   qwd: z.object({ url: z.string().trim().default('') }).default({})
 });
 
@@ -41,10 +37,11 @@ export function loadConfig(configFile = path.resolve(process.cwd(), 'config.yml'
   const parsed = configSchema.parse(source ?? {});
   const publicEndpoint = parsePublicUri(parsed.room.public_uri);
   const roomId = createRoomId();
+  const debug = loadDebugConfig(configFile);
 
   return {
-    env: parsed.env,
-    logging: { level: parsed.logging.level, pretty: parsed.logging.pretty || parsed.env === 'development' },
+    debug,
+    logging: { level: parsed.logging.level, pretty: parsed.logging.pretty },
     room: {
       id: roomId,
       host: parsed.room.host,
@@ -59,10 +56,43 @@ export function loadConfig(configFile = path.resolve(process.cwd(), 'config.yml'
       badPacketLimit: parsed.room.bad_packet_limit,
       moveTimeoutMs: parsed.room.move_timeout_ms,
       playerStateDecode: parsed.room.player_state_decode,
-      moveTargets: parsed.room.move_targets,
-      qwdUrl: parsed.qwd.url
+      qwdUrl: parsed.qwd.url,
+      debugPackets: debug.enabled,
+      debugChannels: debug.channels
     }
   };
+}
+
+/**
+ * Load `debug.yml`, the packet-logging switches.
+ *
+ * It sits beside `config.yml` and is optional: a missing file means "defaults",
+ * which log nothing but the packets that are not routine. Keeping it separate
+ * from `config.yml` means a debugging session does not dirty the deploy config,
+ * and the file can be handed around on its own.
+ *
+ * @param {string|object} configFile the path, or an inline config object
+ * @returns {{ enabled: Set<string>, channels: Set<string>, warnings: string[] }}
+ */
+function loadDebugConfig(configFile) {
+  const debugFile = typeof configFile === 'string'
+    ? path.join(path.dirname(configFile), 'debug.yml')
+    : null;
+
+  let source = {};
+  if (debugFile && existsSync(debugFile)) {
+    source = parseYaml(readFileSync(debugFile, 'utf8')) ?? {};
+  }
+
+  const warnings = [];
+  const enabled = parsePacketSwitches(source.packets ?? {}, {
+    onUnknown: name => warnings.push(`debug.yml: unknown packet "${name}"`)
+  });
+  const channels = parseChannelSwitches(source.channels ?? {}, {
+    onUnknown: name => warnings.push(`debug.yml: unknown channel "${name}"`)
+  });
+
+  return { enabled, channels, warnings, file: debugFile };
 }
 
 function parsePublicUri(value) {

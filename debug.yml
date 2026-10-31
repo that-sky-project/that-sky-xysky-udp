@@ -1,0 +1,72 @@
+packets:
+  # --- routine traffic: keep these off unless chasing a specific bug ---
+  # Player position/state, several times a second per player.
+  PlayerStateDelta: false
+  # Authority level snapshots, once per tick.
+  NetLevelData: false
+  # Acks for the above.
+  SnapshotAck: false
+  # Friendship/affinity refresh.
+  Affinity: false
+  # Level state side channel.
+  LevelStateSideChannel: false
+  # Authority heartbeat.
+  NetLevelDataHeartbeat: false
+  # Client metrics telemetry.
+  Metrics: false
+  # Ambient critters.
+  Critters: false
+  # Music timeline sync.
+  MusicSync: false
+
+  # --- control traffic: rare, and the ones worth seeing ---
+  NetRpc: true
+  NetLevelDataElect: true
+  NetLevelDataRevoke: true
+  NetLevelDataRevokeAck: true
+  NetLevelElectionNominee: true
+  JoinGame: true
+  EnterGame: true
+  LevelUpdate: true
+  MoveGame: true
+  MoveResult: true
+  CancelMove: true
+  Disconnect: true
+  Kick: true
+  PlayerLeft: true
+  PlayerChangeLevel: true
+  NetTimePing: true
+  NetTimePong: true
+
+  # --- audience barn ---
+  # The three that repeat every few seconds; quiet by default.
+  Audience: false
+  AudienceRoomIds: false
+  AudienceStreamInfo: false
+  # Slower and more informative.
+  AudienceReliableData: false
+  AudienceFeatureFlags: true
+  AudienceConsensus: true
+  AudienceSpotlightResponse: true
+  SocialBroadcastDown: true
+  PresenceMatches: true
+  AudienceChatDownReliable: true
+  AudienceChatDownUnreliable: true
+
+  # --- audience requests, client to server ---
+  AudienceHint: false
+  AudienceSocialBroadcast: true
+  AudienceConsensusVote: true
+  AudienceChat: true
+  AudienceSpotlightRequest: true
+
+# Switches for streams that are not a single packet.
+#
+# Some output is one lens over many packets rather than one id: every command
+# the manager sends, every seated player whose position moved. Those would hide
+# unrelated traffic if folded into a packet switch, so they get their own name.
+channels:
+  # Every command received from the QWD manager (seat.assign, audience.snapshot,
+  # room.reserve, …). One line per command, so it is quiet when nothing is
+  # happening — but it is the first thing to look at when the hall is empty.
+  qwdCommand: false

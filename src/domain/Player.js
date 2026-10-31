@@ -11,8 +11,6 @@ export class Player {
     this.levelChangeCount = this.lvSeq;
     this.joinedAt = Date.now();
     this.lastSeenAt = Date.now();
-    // PlayerState decoding belongs in GameMessageService after the snapshot
-    // body has been reconstructed and its native 0x4b5 limit checked.
     this.playerDelta = new PlayerSnapshotState();
     this.levelDelta = new PlayerSnapshotState();
   }

@@ -49,7 +49,6 @@ export class PlayerSnapshotState {
         try {
           this.decodedState = decodePlayerState(result.data);
         } catch {
-          // Keep the raw state available for the size check and opaque relay.
           this.decodedState = null;
         }
       } else {
@@ -69,8 +68,6 @@ export class PlayerSnapshotState {
       return undefined;
     }
 
-    // Writer returns a Buffer: [save_seq, base_seq, checksum, ...payload]
-    // Unpack into the object form expected by GameMessageService.
     const frame = {
       sequence: frameBuf[0],
       base:     frameBuf[1],

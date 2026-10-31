@@ -68,8 +68,6 @@ export class LevelService {
       this.levels.revokeAuthority(levelId, { reason });
     }
 
-    // PeerEventHandler removes the player before calling this method, so the
-    // rebalance sees only viable peers and elects one immediately.
     return this.rebalanceAuthority(levelId);
   }
 
@@ -93,7 +91,6 @@ export class LevelService {
       this.levels.clearAuthorityPenalty?.(levelId, next);
     }
     if (next) {
-      // setAuthority fires onAuthorityElected handlers for all-level broadcast.
       this.levels.setAuthority(levelId, next, {
         previousAuthorityPlayerId,
         reason: current ? 'authority_left_level' : reason

@@ -17,9 +17,6 @@ export class TgcUuid {
     this.bytes = Buffer.from(bytes);
   }
 
-  // Player UUIDs travel through the manager protocol as the textual form
-  // toString() produces, and the manager may supply a room's destination uuid
-  // the same way, so accept it back symmetrically.
   static parse(text) {
     const value = String(text ?? '');
     if (!UUID_TEXT.test(value)) {

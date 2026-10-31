@@ -1,14 +1,19 @@
 export class BroadcastService {
-  constructor({ codec, transport, sessions, metrics }) {
+  constructor({ codec, transport, sessions, metrics, packetDebug }) {
     this.codec = codec;
     this.transport = transport;
     this.sessions = sessions;
     this.metrics = metrics;
+    this.packetDebug = packetDebug;
   }
 
   send(session, packet, options = { reliable: true }) {
     const buffer = this.codec.encodeServer(packet, session);
     this.metrics?.packetBytes?.inc({ direction: 'server' }, buffer.length);
+    this.packetDebug?.log('s2c', packet, {
+      peerId: session.peerId?.toString?.(),
+      sessionId: session.id
+    });
     return this.transport.send(session.peerId, buffer, options);
   }
 
@@ -16,6 +21,10 @@ export class BroadcastService {
     this._iterateSessions({ exceptSession, playerOnly }, session => {
       const buffer = this.codec.encodeServer(packet, session);
       this.metrics?.packetBytes?.inc({ direction: 'server' }, buffer.length);
+      this.packetDebug?.log('s2c', packet, {
+        peerId: session.peerId?.toString?.(),
+        sessionId: session.id
+      });
       this.transport.send(session.peerId, buffer, { channel, reliable });
     });
   }

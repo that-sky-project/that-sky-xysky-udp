@@ -1,71 +1,46 @@
-import { PacketCodec } from '../protocol/PacketCodec.js';
-import { TgcUuid } from '../protocol/types/TgcUuid.js';
-import { ConnectionManager } from '../connection/ConnectionManager.js';
-import { PacketDispatcher } from '../connection/PacketDispatcher.js';
-import { registerAllHandlers } from '../connection/handlers/index.js';
-import { PlayerStore } from '../domain/PlayerStore.js';
-import { LevelStateStore } from '../domain/LevelStateStore.js';
-import { RoomDirectory } from '../domain/RoomDirectory.js';
-import { EnetServer } from '../transport/EnetServer.js';
-import { BroadcastService } from '../features/broadcast/BroadcastService.js';
-import { JoinService } from '../features/join/JoinService.js';
-import { LevelService } from '../features/level/LevelService.js';
-import { GameMessageService } from '../features/gamemsg/GameMessageService.js';
-import { MoveService } from '../features/move/MoveService.js';
-import { QwdClient } from '../qwd/QwdClient.js';
-import { ErrorCode, fail, ok } from '../qwd/errorCodes.js';
-import { PeerEventHandler } from './PeerEventHandler.js';
-import { TickLoop } from './TickLoop.js';
-import { AuthorityElectionGate } from './AuthorityElectionCoordinator.js';
-
-// A full telemetry frame is re-sent at least this often even when nothing
-// changed. Besides re-syncing a manager whose delta base drifted, this bounds
-// how long a dropped delta can leave the manager's room version frozen (a
-// frozen version makes every later move.prepare look like a STALE_PLAN).
-const TELEMETRY_FULL_RESYNC_FRAMES = 30;
-const TELEMETRY_FULL_RESYNC_MS = 10_000;
-// An unchanged player is re-sent at least this often. Without it a room whose
-// players stand still publishes nothing between full resyncs: the manager ages
-// the whole node out of listHealthy (nodes.stale_ms) and freezes stateAt, while
-// an empty room — which always sends a full frame — stays visible. Allocation
-// then systematically prefers empty rooms and freshness signals go stale.
-const TELEMETRY_PLAYER_KEEPALIVE_MS = 2_000;
-
-/**
- * MoveGame carries the destination room as a 16-byte TgcUuid, while QWD only
- * knows room ids. Room ids are 8-digit decimal numbers, so map the number into
- * the last 12 hex digits of a fixed uuid. Deterministic: every node derives the
- * same value for the same room. UUID-shaped ids (an older node build or an
- * explicit toRoomUuid) pass through unchanged, which keeps mixed-version
- * clusters working during a rollout.
- */
-export function destinationUuid(roomId) {
-  if (roomId === undefined || roomId === null) return undefined;
-  const value = String(roomId);
-  if (TgcUuid.isText(value)) return value;
-  // Only a plain decimal id is accepted; Number('') / Number('0x10') / 1e3
-  // must not silently turn into a uuid.
-  if (!/^\d{1,15}$/.test(value)) return undefined;
-  const numeric = Number(value);
-  if (!Number.isSafeInteger(numeric) || numeric > 0xffffffffffff) return undefined;
-  return `00000000-0000-4000-8000-${numeric.toString(16).padStart(12, '0')}`;
-}
-
+import { PacketIds } from '../protocol/PacketIds.js'
+import { PacketCodec } from '../protocol/PacketCodec.js'
+import { ConnectionManager } from '../connection/ConnectionManager.js'
+import { PacketDispatcher } from '../connection/PacketDispatcher.js'
+import { registerAllHandlers } from '../connection/handlers/index.js'
+import { PlayerStore } from '../domain/PlayerStore.js'
+import { LevelStateStore } from '../domain/LevelStateStore.js'
+import { RoomDirectory } from '../domain/RoomDirectory.js'
+import { EnetServer } from '../transport/EnetServer.js'
+import { BroadcastService } from '../features/broadcast/BroadcastService.js'
+import { JoinService } from '../features/join/JoinService.js'
+import { LevelService } from '../features/level/LevelService.js'
+import { GameMessageService } from '../features/gamemsg/GameMessageService.js'
+import { MoveService } from '../features/move/MoveService.js'
+import { AudienceService } from '../features/audience/AudienceService.js'
+import { AudienceCodec } from '../protocol/AudienceCodec.js'
+import { QwdClient } from '../qwd/QwdClient.js'
+import { ErrorCode, fail, ok } from '../qwd/errorCodes.js'
+import { PeerEventHandler } from './PeerEventHandler.js'
+import { TickLoop } from './TickLoop.js'
+import { AuthorityElectionGate } from './AuthorityElectionCoordinator.js'
+import { PacketDebugLog } from '../observability/debugPackets.js'
+import { dispatchQwdCommand } from './QwdCommands.js'
+import { destinationUuid } from './destinationUuid.js'
+const TELEMETRY_FULL_RESYNC_FRAMES = 30
+const TELEMETRY_FULL_RESYNC_MS = 10_000
+const TELEMETRY_PLAYER_KEEPALIVE_MS = 2_000
 export class RoomServer {
-  constructor({ config, logger, metrics }) {
-    this.config = config;
-    this.logger = logger;
-    this.metrics = metrics;
-
-    // Infrastructure
-    this.codec = new PacketCodec();
-    this.sessions = new ConnectionManager({ roomId: config.id });
-    // Sky rooms are semantically capped at eight players even when the ENet
-    // peer socket pool is configured larger for handshakes or spectators.
-    this.roomCapacity = 8;
-    this.players = new PlayerStore({ maxPlayers: this.roomCapacity });
-    this.levels = new LevelStateStore({ roomId: config.id, logger });
-    this.rooms = new RoomDirectory();
+  constructor ({ config, logger, metrics }) {
+    this.config = config
+    this.logger = logger
+    this.metrics = metrics
+    this.codec = new PacketCodec()
+    this.packetDebug = new PacketDebugLog({
+      logger,
+      enabled: new Set(config.debugPackets ?? []),
+      channels: new Set(config.debugChannels ?? [])
+    })
+    this.sessions = new ConnectionManager({ roomId: config.id })
+    this.roomCapacity = 8
+    this.players = new PlayerStore({ maxPlayers: this.roomCapacity })
+    this.levels = new LevelStateStore({ roomId: config.id, logger })
+    this.rooms = new RoomDirectory()
     this.qwd = new QwdClient({
       url: config.qwdUrl,
       room: config,
@@ -73,75 +48,145 @@ export class RoomServer {
       onCommand: command => this.handleQwdCommand(command),
       onRoomIdConflict: roomId => this.handleRoomIdConflict(roomId),
       onConnected: () => this.reannounceQwdState(),
-      snapshot: () => ({ players: this.players.size, version: this.telemetrySeq, capacity: this.roomCapacity }),
-      // A dropped control socket does not cancel an in-flight migration — the
-      // client is still moving. Keep reservations but stop honouring them
-      // indefinitely: shrink the TTL so capacity cannot leak if the manager
-      // never returns.
+      snapshot: () => ({
+        players: this.players.size,
+        version: this.telemetrySeq,
+        capacity: this.roomCapacity
+      }),
       onTransportDropped: () => {
-        const deadline = Date.now() + 15000;
+        const deadline = Date.now() + 15000
         for (const reservation of this.qwdReservations.values()) {
-          reservation.expiresAt = Math.min(reservation.expiresAt, deadline);
+          reservation.expiresAt = Math.min(reservation.expiresAt, deadline)
         }
       }
-    });
-    this.telemetrySeq = 0;
-    this.lastQwdTelemetryAt = 0;
-    // Differential telemetry bookkeeping.
-    this.lastTelemetryRoster = null;
-    this.lastTelemetrySeqSent = 0;
-    this.lastFullTelemetrySeq = 0;
-    this.lastFullTelemetryAt = 0;
-    // playerId -> when this node last put the player on the wire. Drives the
-    // per-player keepalive that keeps idle rooms visible to the manager.
-    this.lastTelemetrySentAt = new Map();
-    this.qwdReservations = new Map();
-    this.migrationRosters = new Map();
-    this.authorityElectionGate = new AuthorityElectionGate();
+    })
+    this.telemetrySeq = 0
+    this.lastQwdTelemetryAt = 0
+    this.lastTelemetryRoster = null
+    this.lastTelemetrySeqSent = 0
+    this.lastFullTelemetrySeq = 0
+    this.lastFullTelemetryAt = 0
+    this.lastTelemetrySentAt = new Map()
+    this.qwdReservations = new Map()
+    this.migrationRosters = new Map()
+    this.authorityElectionGate = new AuthorityElectionGate()
     this.transport = new EnetServer({
       host: config.host,
       port: config.port,
       maxPeers: config.maxPeers,
       channels: config.channels,
       logger
-    });
-
-    // Services
+    })
     this.broadcaster = new BroadcastService({
       codec: this.codec,
       transport: this.transport,
       sessions: this.sessions,
-      metrics
-    });
-
+      metrics,
+      packetDebug: this.packetDebug
+    })
     this.joinService = new JoinService({
       players: this.players,
       levels: this.levels,
+      levelService: undefined,
       broadcaster: this.broadcaster,
       logger,
       metrics,
       migration: {
-        claim: (session, payload) => this.claimMigrationRoster(session, payload),
+        claim: (session, payload) =>
+          this.claimMigrationRoster(session, payload),
         complete: roster => this.completeMigrationRoster(roster)
       },
-      onPlayerJoined: player => { this.consumeQwdReservation(player.uuid.toString()); this.qwd.publish('player.join', { roomId: this.config.id, player: { playerId: player.uuid.toString(), level: player.levelId } }); }
-    });
-
+      onPlayerJoined: player => {
+        this.consumeQwdReservation(player.uuid.toString())
+        this.qwd.publish('player.join', {
+          roomId: this.config.id,
+          player: { playerId: player.uuid.toString(), level: player.levelId }
+        })
+      },
+      onEvict: previous => {
+        const playerId = previous.uuid?.toString?.() ?? ''
+        const roster = playerId
+          ? this.audienceService?.rosters.get(playerId)
+          : undefined
+        this.audienceService?.forgetPlayer(playerId)
+        this.moveService?.forgetPlayerMoves?.(previous)
+        this.sessions.remove(previous.session?.peerId)
+        this.transport.disconnect(previous.session?.peerId, 'later')
+        this.broadcaster.broadcast(
+          {
+            id: PacketIds.PlayerLeft,
+            payload: { playerId: previous.id, reason: 0 }
+          },
+          { playerOnly: true }
+        )
+        if (playerId) {
+          this.qwd.publish('player.leave', {
+            roomId: this.config.id,
+            player: { playerId }
+          })
+          if (roster) {
+            this.qwd.publish('seat.released', {
+              roomId: this.config.id,
+              player: { playerId },
+              levelId: roster.levelId ?? 0,
+              benchId: roster.benchId,
+              seatId: roster.seatId
+            })
+          }
+        }
+      }
+    })
     this.levelService = new LevelService({
       players: this.players,
       levels: this.levels,
       broadcaster: this.broadcaster,
       logger
-    });
-
+    })
+    this.joinService._levelService = this.levelService
     this.gameMessageService = new GameMessageService({
       players: this.players,
       levels: this.levels,
       broadcaster: this.broadcaster,
       logger,
-      stateDecode: this.config.playerStateDecode
-    });
-
+      stateDecode: this.config.playerStateDecode,
+      packetDebug: this.packetDebug
+    })
+    this.audienceCodec = new AudienceCodec()
+    this.audienceService = new AudienceService({
+      logger,
+      packetDebug: this.packetDebug,
+      currentLevelOf: playerId => this.players.getByUuid(playerId)?.levelId,
+      onPositionChanged: (playerId, roster, position, levelTime) => {
+        this.qwd.publish('seat.occupied', {
+          roomId: this.config.id,
+          player: { playerId },
+          levelId: roster.levelId ?? 0,
+          benchId: roster.benchId,
+          seatId: roster.seatId,
+          position,
+          levelTime
+        })
+      },
+      onSpotlightChanged: ({ levelId, playerId, active }) => {
+        this.qwd.publish('spotlight.changed', {
+          roomId: this.config.id,
+          levelId,
+          player: { playerId },
+          active
+        })
+      },
+      sendToClient: (playerId, packet) => {
+        const session = this._sessionForPlayer(playerId)
+        if (!session) return Promise.resolve()
+        const reliable = packet.id !== 27 && packet.id !== 33
+        const buffer = this.audienceCodec.encode(packet)
+        this.packetDebug?.log('s2c', packet, {
+          peerId: session.peerId?.toString?.(),
+          sessionId: session.id
+        })
+        return this.transport.send(session.peerId, buffer, { reliable })
+      }
+    })
     this.moveService = new MoveService({
       players: this.players,
       rooms: this.rooms,
@@ -151,7 +196,7 @@ export class RoomServer {
       logger,
       moveTimeoutMs: config.moveTimeoutMs,
       onMoveResult: (move, accepted) => {
-        if (!move.transactionId) return;
+        if (!move.transactionId) return
         this.qwd.publish('move.result', {
           roomId: this.config.id,
           moveId: move.transactionId,
@@ -159,33 +204,25 @@ export class RoomServer {
           movedPlayerIds: accepted ? [move.playerUuid] : [],
           failedPlayerIds: accepted ? [] : [move.playerUuid],
           reason: accepted ? undefined : `client_move_result_${move.result}`
-        });
+        })
       }
-    });
-
-    // Wire up authority-elected event: send NetLevelDataElect to all affected players.
-    // The third argument (targetPlayer) is set by JoinService/LevelService when only
-    // one specific player needs the Elect (stable authority, single-target notify).
+    })
     this.levels.onAuthorityElected((levelId, authority, targetPlayer) => {
-      this._handleAuthorityElected(levelId, authority, targetPlayer);
-    });
-
-    // Dispatcher — holds context bag, registers all C→S handlers
+      this._handleAuthorityElected(levelId, authority, targetPlayer)
+    })
     const context = Object.freeze({
       joinService: this.joinService,
       levelService: this.levelService,
       gameMessageService: this.gameMessageService,
+      audienceService: this.audienceService,
       moveService: this.moveService,
       broadcaster: this.broadcaster,
       logger,
       clock: () => Date.now() / 1000,
       transport: this.transport
-    });
-
-    this.dispatcher = new PacketDispatcher({ context });
-    registerAllHandlers(this.dispatcher);
-
-    // Peer event handler (transport ↔ dispatcher bridge)
+    })
+    this.dispatcher = new PacketDispatcher({ context })
+    registerAllHandlers(this.dispatcher)
     this.peerHandler = new PeerEventHandler({
       config,
       sessions: this.sessions,
@@ -194,403 +231,403 @@ export class RoomServer {
       players: this.players,
       levelService: this.levelService,
       moveService: this.moveService,
+      audienceService: this.audienceService,
       broadcaster: this.broadcaster,
       transport: this.transport,
       metrics,
       logger,
-      onPlayerLeft: player => this.qwd.publish('player.leave', { roomId: this.config.id, player: { playerId: player.uuid.toString() } })
-    });
-
-    // Move targets
-    for (const target of config.moveTargets) {
-      this.rooms.register(target);
-    }
-
+      packetDebug: this.packetDebug,
+      onPlayerLeft: player => {
+        this.qwd.publish('player.leave', {
+          roomId: this.config.id,
+          player: { playerId: player.uuid.toString() }
+        })
+        const playerId = player.uuid.toString()
+        const roster = this.audienceService.rosters.get(playerId)
+        if (roster) {
+          this.qwd.publish('seat.released', {
+            roomId: this.config.id,
+            player: { playerId },
+            levelId: roster.levelId ?? 0,
+            benchId: roster.benchId,
+            seatId: roster.seatId
+          })
+        }
+      }
+    })
     this.tickLoop = new TickLoop({
       tickRate: config.tickRate,
       logger,
       onTick: () => this.onTick()
-    });
+    })
   }
-
-  async start() {
-    this.qwd.start();
-    this.transport.on('peer:connect',    peerId => this.peerHandler.onConnect(peerId));
-    this.transport.on('peer:message',    (peerId, data) => this.peerHandler.onMessage(peerId, data));
-    this.transport.on('peer:disconnect', (peerId, data) => this.peerHandler.onDisconnect(peerId, data));
-
-    await this.transport.start();
-    this.tickLoop.start();
+  async start () {
+    this.qwd.start()
+    this.transport.on('peer:connect', peerId =>
+      this.peerHandler.onConnect(peerId)
+    )
+    this.transport.on('peer:message', (peerId, data, channel) =>
+      this.peerHandler.onMessage(peerId, data, channel)
+    )
+    this.transport.on('peer:disconnect', (peerId, data) =>
+      this.peerHandler.onDisconnect(peerId, data)
+    )
+    this.transport.on('error', error => {
+      this.logger.error({ err: error }, 'enet transport error')
+    })
+    await this.transport.start()
+    this.tickLoop.start()
   }
-
-  async stop() {
-    this.qwd.stop();
-    this.tickLoop.stop();
-    await this.transport.stop();
+  async stop () {
+    this.qwd.stop()
+    this.tickLoop.stop()
+    await this.transport.stop()
   }
-
-  handleRoomIdConflict(roomId) {
-    this.config.id = roomId;
-    this.sessions.setRoomId(roomId);
-    this.levels.roomId = roomId;
+  handleRoomIdConflict (roomId) {
+    this.config.id = roomId
+    this.sessions.setRoomId(roomId)
+    this.levels.roomId = roomId
   }
-
-  reannounceQwdState() {
-    const active = this.players.listActive();
-    // No per-player player.join replay: the manager restores membership from
-    // room.created (which carries the authoritative player count) plus the full
-    // telemetry snapshot below. Replaying joins would bump the manager's
-    // occupancy once per player and double-count rooms that survived in its
-    // grace window.
-    this.logger.info({
-      roomId: this.config.id,
-      players: active.length,
-      lastSeqSent: this.lastTelemetrySeqSent,
-      lastFullSeq: this.lastFullTelemetrySeq
-    }, 'qwd connected; forcing full telemetry resync');
-    this.lastTelemetryRoster = null;
-    this.lastQwdTelemetryAt = 0;
-    this.publishQwdTelemetry();
+  reannounceQwdState () {
+    const active = this.players.listActive()
+    this.logger.info(
+      {
+        roomId: this.config.id,
+        players: active.length,
+        lastSeqSent: this.lastTelemetrySeqSent,
+        lastFullSeq: this.lastFullTelemetrySeq
+      },
+      'qwd connected; forcing full telemetry resync'
+    )
+    this.lastTelemetryRoster = null
+    this.lastQwdTelemetryAt = 0
+    this.publishQwdTelemetry()
   }
-
-  _handleAuthorityElected(levelId, authority, targetPlayer) {
+  _handleAuthorityElected (levelId, authority, targetPlayer) {
     if (this.authorityElectionGate.isSuppressed(levelId)) {
-      return;
+      return
     }
     if (targetPlayer) {
-      this.gameMessageService.sendElect(targetPlayer, authority, this.levels.loadLevelData(levelId));
-      return;
+      this.gameMessageService.sendElect(
+        targetPlayer,
+        authority,
+        this.levels.loadLevelData(levelId)
+      )
+      return
     }
     for (const player of this.players.listActiveInLevel(levelId)) {
-      this.gameMessageService.sendElect(player, authority, this.levels.loadLevelData(levelId));
+      this.gameMessageService.sendElect(
+        player,
+        authority,
+        this.levels.loadLevelData(levelId)
+      )
     }
   }
-
-  onTick() {
-    this.expireMigrationRosters();
-    // Reservations must expire on their own: when no command arrives for a
-    // while (the usual idle state), the deadline still has to be honoured so
-    // capacity is not held forever and the manager learns about it promptly.
-    this.expireQwdReservations();
-    this.moveService.expireStuckMoves();
-    this.metrics.connectedPeers.set(this.sessions.size);
-    this.metrics.onlinePlayers.set(this.players.size);
-    this.gameMessageService.syncPlayerStates();
-    this.gameMessageService.syncLevelData();
-    this.gameMessageService.sendSnapshotAcks();
-    this.publishQwdTelemetry();
+  _sessionForPlayer (playerId) {
+    return this.players.getByUuid(playerId)?.session ?? null
   }
-
-  claimMigrationRoster(session, payload) {
-    if (!Array.isArray(payload.move?.players) || payload.move.players.length === 0) {
-      return undefined;
+  onTick () {
+    this.expireMigrationRosters()
+    this.expireQwdReservations()
+    this.moveService.expireStuckMoves()
+    this.metrics.connectedPeers.set(this.sessions.size)
+    this.metrics.onlinePlayers.set(this.players.size)
+    this.gameMessageService.syncPlayerStates()
+    this.gameMessageService.syncLevelData()
+    this.gameMessageService.sendSnapshotAcks()
+    this.publishQwdTelemetry()
+    this.tickCounter = (this.tickCounter ?? 0) + 1
+    if (this.tickCounter % 50 === 0) {
+      const stateSample = []
+      for (const playerId of this.audienceService.rosters.keys()) {
+        const player = this.players.getByUuid(playerId)
+        const delta = player?.playerDelta
+        stateSample.push({
+          playerId,
+          lastReadAt: delta?.stats?.lastReadAt,
+          readStatus: delta?.stats?.lastReadStatus,
+          readError: delta?.stats?.lastReadError,
+          dataBytes: delta?.stats?.lastReadDataBytes,
+          position: delta?.decodedState?.fields?.position ?? null,
+          levelLastReadAt: player?.levelDelta?.stats?.lastReadAt,
+          levelReadStatus: player?.levelDelta?.stats?.lastReadStatus,
+          levelReadError: player?.levelDelta?.stats?.lastReadError,
+          levelBytes: player?.levelDelta?.stats?.lastReadDataBytes,
+          lvSeq: player?.lvSeq
+        })
+      }
     }
-    const ownUuid = payload.uuid?.toString?.();
+    const nowMs = Date.now()
+    if (this.audienceService.rosters.size > 0) {
+      this.audienceService.feedLocalPositions(
+        Date.now() / 1000,
+        playerId =>
+          this.players.getByUuid(playerId)?.playerDelta?.decodedState?.fields
+            ?.position
+      )
+    }
+    if (
+      this.audienceService.rosters.size > 0 &&
+      nowMs - (this.lastAudienceFrameAt ?? 0) >= 1000
+    ) {
+      this.lastAudienceFrameAt = nowMs
+      this.audienceService
+        .broadcastFrame(Date.now() / 1000, this.audienceOrigin)
+        .catch(error =>
+          this.logger.debug?.({ err: error }, 'audience frame failed')
+        )
+    }
+    if (
+      this.audienceService.rosters.size > 0 &&
+      nowMs - (this.lastAudienceTimelineAt ?? 0) >= 2500
+    ) {
+      this.lastAudienceTimelineAt = nowMs
+      this.audienceService
+        .broadcastTimeline(Date.now() / 1000)
+        .catch(error =>
+          this.logger.debug?.({ err: error }, 'audience timeline failed')
+        )
+    }
+  }
+  claimMigrationRoster (session, payload) {
+    if (
+      !Array.isArray(payload.move?.players) ||
+      payload.move.players.length === 0
+    ) {
+      return undefined
+    }
+    const ownUuid = payload.uuid?.toString?.()
     const uuids = payload.move.players
       .map(uuid => uuid?.toString?.())
-      .filter(Boolean);
-    if (!ownUuid || !uuids.includes(ownUuid)) return undefined;
-
-    let reservationId;
+      .filter(Boolean)
+    if (!ownUuid || !uuids.includes(ownUuid)) return undefined
+    let reservationId
     for (const [id, reservation] of this.qwdReservations) {
-      if (reservation.playerIds.has(ownUuid) && uuids.every(uuid => reservation.playerIds.has(uuid))) {
-        reservationId = id;
-        break;
+      if (
+        reservation.playerIds.has(ownUuid) &&
+        uuids.every(uuid => reservation.playerIds.has(uuid))
+      ) {
+        reservationId = id
+        break
       }
     }
-    // A non-moving Join with an arbitrary UUID list is not a migration. The
-    // reservation is the authenticated cross-room handoff; moving=true is
-    // accepted for deployments that do not run QWD.
-    if (!payload.moving && !reservationId) return undefined;
-    const key = reservationId ?? `move:${uuids.slice().sort().join(',')}`;
-    let roster = this.migrationRosters.get(key);
+    if (!payload.moving && !reservationId) return undefined
+    const key = reservationId ?? `move:${uuids.slice().sort().join(',')}`
+    let roster = this.migrationRosters.get(key)
     if (!roster) {
       if (this.players.size + uuids.length > this.players.maxPlayers) {
-        this.logger.warn({ key, players: this.players.size, requested: uuids.length }, 'migration roster exceeds room capacity');
-        return undefined;
+        this.logger.warn(
+          { key, players: this.players.size, requested: uuids.length },
+          'migration roster exceeds room capacity'
+        )
+        return undefined
       }
-      const entries = [];
-      const used = new Set(this.players.list().map(player => player.id));
+      const entries = []
+      const used = new Set(this.players.list().map(player => player.id))
       for (const uuid of uuids) {
-        let netId = this.players.allocateId();
-        while (used.has(netId)) netId = this.players.allocateId();
-        used.add(netId);
-        this.players.reserveId(netId);
-        const value = payload.move.players.find(item => item.toString() === uuid);
-        entries.push({ netId, uuid: value, levelId: payload.levelId ?? 0 });
+        let netId = this.players.allocateId()
+        while (used.has(netId)) netId = this.players.allocateId()
+        used.add(netId)
+        this.players.reserveId(netId)
+        const value = payload.move.players.find(
+          item => item.toString() === uuid
+        )
+        entries.push({ netId, uuid: value, levelId: payload.levelId ?? 0 })
       }
-      roster = { key, entries, joined: new Set(), expiresAt: Date.now() + 15000, sessionIds: new Set() };
-      this.migrationRosters.set(key, roster);
-    }
-    roster.sessionIds.add(session.id);
-    roster.expiresAt = Date.now() + 15000;
-    return roster;
-  }
-
-  completeMigrationRoster(roster) {
-    if (!roster) return;
-    const allJoined = roster.entries.every(entry => roster.joined.has(entry.uuid.toString()));
-    if (!allJoined) return;
-    this.migrationRosters.delete(roster.key);
-    for (const entry of roster.entries) this.players.releaseReservedId(entry.netId);
-    for (const [id, reservation] of this.qwdReservations) {
-      if (reservation.playerIds.size === roster.entries.length && roster.entries.every(entry => reservation.playerIds.has(entry.uuid.toString()))) {
-        this.qwdReservations.delete(id);
-      }
-    }
-  }
-
-  expireMigrationRosters(now = Date.now()) {
-    for (const [key, roster] of this.migrationRosters) {
-      if (roster.expiresAt > now) continue;
-      this.migrationRosters.delete(key);
-      for (const entry of roster.entries) this.players.releaseReservedId(entry.netId);
-    }
-  }
-
-  handleQwdCommand(command) {
-    this.expireQwdReservations();
-    if (command.cmd === 'room.reserve') {
-      const roomId = String(command.data?.roomId ?? '');
-      const playerId = String(command.data?.playerId ?? '');
-      if (!roomId || roomId !== String(this.config.id) || !playerId) {
-        return fail(ErrorCode.BAD_REQUEST, 'invalid room reservation');
-      }
-      const existingId = this.findReservationByPlayer(playerId);
-      if (existingId) {
-        return ok({ accepted: true, reservationId: existingId, slots: 1 });
-      }
-      if (!this.hasReservationCapacity(1)) {
-        return fail(ErrorCode.NO_CAPACITY, 'room capacity reserved');
-      }
-      const reservationId = `allocation-${playerId}-${Date.now()}`;
-      this.qwdReservations.set(reservationId, {
-        playerIds: new Set([playerId]),
+      roster = {
+        key,
+        entries,
         joined: new Set(),
-        expiresAt: Date.now() + Number(command.data?.ttlMs ?? 15000)
-      });
-      return ok({ accepted: true, reservationId, slots: 1 });
-    }
-    if (command.cmd === 'move.prepare') {
-      const moveId = String(command.data?.moveId ?? '');
-      const playerIds = Array.isArray(command.data?.playerIds) ? command.data.playerIds.map(String) : [];
-      if (!moveId || !playerIds.length || new Set(playerIds).size !== playerIds.length) return fail(ErrorCode.BAD_REQUEST, 'invalid move prepare');
-      const existing = this.qwdReservations.get(moveId);
-      if (existing) {
-        const same = existing.playerIds.size === playerIds.length && playerIds.every(id => existing.playerIds.has(id));
-        if (!same) return fail(ErrorCode.CONFLICT, 'move reservation conflicts');
-        existing.expiresAt = Date.now() + Number(command.data?.ttlMs ?? 15000);
-        return ok({ accepted: true, moveId, slots: playerIds.length, idempotent: true, version: this.telemetrySeq });
+        expiresAt: Date.now() + 15000,
+        sessionIds: new Set()
       }
-      if (!this.hasReservationCapacity(playerIds.length)) {
-        return fail(ErrorCode.NO_CAPACITY, 'room capacity reserved');
+      this.migrationRosters.set(key, roster)
+    }
+    roster.sessionIds.add(session.id)
+    roster.expiresAt = Date.now() + 15000
+    return roster
+  }
+  completeMigrationRoster (roster) {
+    if (!roster) return
+    const allJoined = roster.entries.every(entry =>
+      roster.joined.has(entry.uuid.toString())
+    )
+    if (!allJoined) return
+    this.migrationRosters.delete(roster.key)
+    for (const entry of roster.entries)
+      this.players.releaseReservedId(entry.netId)
+    for (const [id, reservation] of this.qwdReservations) {
+      if (
+        reservation.playerIds.size === roster.entries.length &&
+        roster.entries.every(entry =>
+          reservation.playerIds.has(entry.uuid.toString())
+        )
+      ) {
+        this.qwdReservations.delete(id)
       }
-
-      // The manager plans against a cached room snapshot. If its expectedVersion
-      // predates our latest telemetry the plan was built from stale state: report
-      // a conflict instead of executing a migration that no longer matches.
-      const expectedVersion = command.data?.expectedVersion;
-      if (typeof expectedVersion === 'number' && Number.isFinite(expectedVersion)) {
-        const currentVersion = this.telemetrySeq;
-        if (expectedVersion < currentVersion && currentVersion - expectedVersion > 3) {
-          return fail(ErrorCode.STALE_PLAN, 'room state advanced past the plan', { expectedVersion, currentVersion, players: this.players.size });
-        }
-      }
-
-      this.qwdReservations.set(moveId, { playerIds: new Set(playerIds), joined: new Set(), expiresAt: Date.now() + Number(command.data?.ttlMs ?? 15000) });
-      return ok({ accepted: true, moveId, slots: playerIds.length, version: this.telemetrySeq });
     }
-    if (command.cmd === 'move.cancel') {
-      this.qwdReservations.delete(String(command.data?.moveId ?? ''));
-      return ok();
+  }
+  expireMigrationRosters (now = Date.now()) {
+    for (const [key, roster] of this.migrationRosters) {
+      if (roster.expiresAt > now) continue
+      this.migrationRosters.delete(key)
+      for (const entry of roster.entries)
+        this.players.releaseReservedId(entry.netId)
     }
-    if (command.cmd !== 'move.commit' && command.cmd !== 'player.redirect') return fail(ErrorCode.BAD_REQUEST, 'unsupported command');
-    const ids = command.data?.playerIds ?? [command.data?.playerId];
-    const group = [];
-    for (const id of ids) {
-      const player = this.players.list().find(item => item.uuid.toString() === String(id) || item.id === Number(id));
-      if (!player || !command.data?.udpHost) return fail(ErrorCode.NOT_FOUND, 'source player not found', { playerId: id });
-      group.push(player);
-    }
-    // MoveGame.destinationUuid must identify the destination room; QWD only
-    // sends the room id. Derive the uuid from the numeric id unless the manager
-    // supplied a real one.
-    const toRoomUuid = TgcUuid.isText(command.data.toRoomUuid)
-      ? command.data.toRoomUuid
-      : destinationUuid(command.data.toRoomId);
-    if (!toRoomUuid) return fail(ErrorCode.BAD_REQUEST, 'invalid destination room uuid', { toRoomId: command.data.toRoomId });
-    const target = { id: command.data.toRoomId, udpHost: command.data.udpHost, udpPort: command.data.udpPort, uuid: toRoomUuid, address: { host: command.data.udpHost, port: command.data.udpPort, toApi() { return { host: this.host, port: this.port }; } } };
-    const result = this.moveService.movePlayersAtomic(group, target, { moveId: command.data.moveId });
-    // Carry the per-player outcome: without it the manager can only tell that
-    // the group as a whole was not accepted and marks every player failed, even
-    // when most of them actually migrated.
-    this.qwd.publish('move.result', {
-      roomId: this.config.id,
-      moveId: command.data.moveId,
-      accepted: result.accepted,
-      reason: result.reason,
-      movedPlayerIds: result.movedPlayerIds ?? [],
-      failedPlayerIds: result.failedPlayerIds ?? []
-    });
-    // Was `409`, which the manager cannot match against its ErrorCode enum and
-    // therefore reports as an unknown failure. CONFLICT (4009) carries the
-    // "move could not be applied" meaning the manager expects.
-    return result.accepted ? ok(result) : { code: ErrorCode.CONFLICT, data: result };
   }
-
-  /** Slots currently held by unexpired reservations. */
-  reservedSlots() {
-    let total = 0;
-    for (const reservation of this.qwdReservations.values()) total += reservation.playerIds.size;
-    return total;
+  handleQwdCommand (command) {
+    this.packetDebug.logChannel(
+      'qwdCommand',
+      {
+        cmd: command?.cmd,
+        roomId: command?.data?.roomId
+      },
+      'qwd command'
+    )
+    this.expireQwdReservations()
+    return dispatchQwdCommand(command, this)
   }
-
-  /**
-   * Whether `count` more players fit alongside live players and existing holds.
-   * Both room.reserve and move.prepare used to inline this formula; keeping one
-   * copy means the cap cannot drift between the two paths.
-   */
-  hasReservationCapacity(count) {
-    return this.players.size + this.reservedSlots() + count <= this.roomCapacity;
+  reservedSlots () {
+    let total = 0
+    for (const reservation of this.qwdReservations.values())
+      total += reservation.playerIds.size
+    return total
   }
-
-  /** The reservation already holding this player, if any (reserve is idempotent). */
-  findReservationByPlayer(playerId) {
-    const wanted = String(playerId);
+  hasReservationCapacity (count) {
+    return this.players.size + this.reservedSlots() + count <= this.roomCapacity
+  }
+  findReservationByPlayer (playerId) {
+    const wanted = String(playerId)
     for (const [reservationId, reservation] of this.qwdReservations) {
-      if (reservation.playerIds.has(wanted)) return reservationId;
+      if (reservation.playerIds.has(wanted)) return reservationId
     }
-    return undefined;
+    return undefined
   }
-
-  expireQwdReservations(now = Date.now()) {
+  expireQwdReservations (now = Date.now()) {
     for (const [moveId, reservation] of this.qwdReservations) {
-      if (reservation.expiresAt > now) continue;
-      this.qwdReservations.delete(moveId);
-      // Tell the manager the hold is gone so it can settle the transaction
-      // immediately instead of waiting for its own 15s timeout.
+      if (reservation.expiresAt > now) continue
+      this.qwdReservations.delete(moveId)
       this.qwd.publish('reservation.expired', {
         roomId: this.config.id,
         moveId,
         playerIds: [...reservation.playerIds]
-      });
+      })
     }
   }
-
-  consumeQwdReservation(playerId) {
+  consumeQwdReservation (playerId) {
     for (const [moveId, reservation] of this.qwdReservations) {
-      if (!reservation.playerIds.has(String(playerId))) continue;
-      reservation.joined.add(String(playerId));
+      if (!reservation.playerIds.has(String(playerId))) continue
+      reservation.joined.add(String(playerId))
       if (reservation.joined.size >= reservation.playerIds.size) {
-        this.qwdReservations.delete(moveId);
-        // Positive confirmation that the whole group landed. The manager
-        // otherwise infers completion from player.join/leave alone, which is
-        // fragile when a client is lost mid-migration.
+        this.qwdReservations.delete(moveId)
         this.qwd.publish('move.completed', {
           roomId: this.config.id,
           moveId,
           playerIds: [...reservation.playerIds]
-        });
+        })
       }
     }
   }
-
-  publishQwdTelemetry() {
-    const now = Date.now();
-    if (now - this.lastQwdTelemetryAt < 1000) return;
-    this.lastQwdTelemetryAt = now;
-    const active = this.players.listActive();
+  publishQwdTelemetry () {
+    const now = Date.now()
+    if (now - this.lastQwdTelemetryAt < 1000) return
+    this.lastQwdTelemetryAt = now
+    const active = this.players.listActive()
     const players = active.map(player => ({
-      playerId: player.uuid.toString(), levelId: player.levelId,
+      playerId: player.uuid.toString(),
+      levelId: player.levelId,
       position: player.playerDelta.decodedState?.fields?.position,
-      velocity: player.playerDelta.decodedState?.fields?.move?.velocity ? Math.hypot(...player.playerDelta.decodedState.fields.move.velocity) : undefined,
-      stateAt: player.playerDelta.stats.lastReadAt ?? player.lastSeenAt, lastMoveAt: player.lastSeenAt,
-      affinity: Object.fromEntries((player.lastAffinity?.entries ?? []).map(entry => {
-        const peer = active.find(candidate => candidate.id === entry.netPlayerId);
-        return peer ? [peer.uuid.toString(), Math.max(0, Math.min(1, Number(entry.value) / 255))] : null;
-      }).filter(Boolean))
-    }));
-    // Only advance the sequence when a frame is actually published. The
-    // manager derives the room version (and therefore `expectedVersion` in
-    // move.prepare) from the last seq it received, so a counter that keeps
-    // ticking through idle ticks makes every later move look stale and the
-    // node rejects valid migrations with STALE_PLAN.
-    const seq = this.telemetrySeq + 1;
-
-    // Differential telemetry: after the first snapshot only send players whose
-    // observable state changed, plus the ids that left. A full snapshot is
-    // re-sent every TELEMETRY_FULL_RESYNC_FRAMES frames or every
-    // TELEMETRY_FULL_RESYNC_MS, whichever comes first.
-    const previous = this.lastTelemetryRoster;
-    const current = new Map();
-    for (const player of players) current.set(player.playerId, player);
-
+      velocity: player.playerDelta.decodedState?.fields?.move?.velocity
+        ? Math.hypot(...player.playerDelta.decodedState.fields.move.velocity)
+        : undefined,
+      stateAt: player.playerDelta.stats.lastReadAt ?? player.lastSeenAt,
+      lastMoveAt: player.lastSeenAt,
+      affinity: Object.fromEntries(
+        (player.lastAffinity?.entries ?? [])
+          .map(entry => {
+            const peer = active.find(
+              candidate => candidate.id === entry.netPlayerId
+            )
+            return peer
+              ? [
+                  peer.uuid.toString(),
+                  Math.max(0, Math.min(1, Number(entry.value) / 255))
+                ]
+              : null
+          })
+          .filter(Boolean)
+      )
+    }))
+    const seq = this.telemetrySeq + 1
+    const previous = this.lastTelemetryRoster
+    const current = new Map()
+    for (const player of players) current.set(player.playerId, player)
     const canDelta =
       previous !== null &&
       previous.size > 0 &&
       seq - this.lastFullTelemetrySeq < TELEMETRY_FULL_RESYNC_FRAMES &&
-      now - this.lastFullTelemetryAt < TELEMETRY_FULL_RESYNC_MS;
-
+      now - this.lastFullTelemetryAt < TELEMETRY_FULL_RESYNC_MS
     if (!canDelta) {
-      this.telemetrySeq = seq;
-      this.qwd.publishTelemetry(players, seq);
-      this.lastTelemetryRoster = current;
-      this.lastFullTelemetrySeq = seq;
-      this.lastFullTelemetryAt = now;
-      this.lastTelemetrySeqSent = seq;
-      this.lastTelemetrySentAt = new Map(players.map(player => [player.playerId, now]));
-      return;
+      this.telemetrySeq = seq
+      this.qwd.publishTelemetry(players, seq)
+      this.lastTelemetryRoster = current
+      this.lastFullTelemetrySeq = seq
+      this.lastFullTelemetryAt = now
+      this.lastTelemetrySeqSent = seq
+      this.lastTelemetrySentAt = new Map(
+        players.map(player => [player.playerId, now])
+      )
+      return
     }
-
-    const changed = [];
+    const changed = []
     for (const [playerId, player] of current) {
-      const before = previous.get(playerId);
-      const sentAt = this.lastTelemetrySentAt.get(playerId) ?? 0;
-      // Keepalive: an idle player is re-sent even though nothing observable
-      // changed, so the manager keeps a fresh stateAt and a live node.
-      if (!before || !this.sameTelemetry(before, player) || now - sentAt >= TELEMETRY_PLAYER_KEEPALIVE_MS) {
-        changed.push(player);
+      const before = previous.get(playerId)
+      const sentAt = this.lastTelemetrySentAt.get(playerId) ?? 0
+      if (
+        !before ||
+        !this.sameTelemetry(before, player) ||
+        now - sentAt >= TELEMETRY_PLAYER_KEEPALIVE_MS
+      ) {
+        changed.push(player)
       }
     }
-    const removed = [];
+    const removed = []
     for (const playerId of previous.keys()) {
-      if (!current.has(playerId)) removed.push(playerId);
+      if (!current.has(playerId)) removed.push(playerId)
     }
-
     if (changed.length === 0 && removed.length === 0) {
-      // Nothing observable changed, so no frame is published and the sequence
-      // must not advance: the manager's cached room version has to stay equal
-      // to the last seq it actually received.
-      this.lastTelemetryRoster = current;
-      return;
+      this.lastTelemetryRoster = current
+      return
     }
-
-    this.telemetrySeq = seq;
-    this.qwd.publishTelemetry(changed, seq, { kind: 'delta', baseSeq: this.lastTelemetrySeqSent, removedPlayers: removed });
-    this.lastTelemetryRoster = current;
-    this.lastTelemetrySeqSent = seq;
-    for (const player of changed) this.lastTelemetrySentAt.set(player.playerId, now);
-    for (const playerId of removed) this.lastTelemetrySentAt.delete(playerId);
+    this.telemetrySeq = seq
+    this.qwd.publishTelemetry(changed, seq, {
+      kind: 'delta',
+      baseSeq: this.lastTelemetrySeqSent,
+      removedPlayers: removed
+    })
+    this.lastTelemetryRoster = current
+    this.lastTelemetrySeqSent = seq
+    for (const player of changed)
+      this.lastTelemetrySentAt.set(player.playerId, now)
+    for (const playerId of removed) this.lastTelemetrySentAt.delete(playerId)
   }
-
-  sameTelemetry(a, b) {
-    if (a.levelId !== b.levelId) return false;
-    if (a.velocity !== b.velocity) return false;
-    const ap = a.position;
-    const bp = b.position;
-    if (!ap !== !bp) return false;
-    if (ap && bp && (ap[0] !== bp[0] || ap[1] !== bp[1] || ap[2] !== bp[2])) return false;
-    return this.sameAffinity(a.affinity, b.affinity);
+  sameTelemetry (a, b) {
+    if (a.levelId !== b.levelId) return false
+    if (a.velocity !== b.velocity) return false
+    const ap = a.position
+    const bp = b.position
+    if (!ap !== !bp) return false
+    if (ap && bp && (ap[0] !== bp[0] || ap[1] !== bp[1] || ap[2] !== bp[2]))
+      return false
+    return this.sameAffinity(a.affinity, b.affinity)
   }
-
-  sameAffinity(a, b) {
-    const ak = a ? Object.keys(a) : [];
-    const bk = b ? Object.keys(b) : [];
-    if (ak.length !== bk.length) return false;
+  sameAffinity (a, b) {
+    const ak = a ? Object.keys(a) : []
+    const bk = b ? Object.keys(b) : []
+    if (ak.length !== bk.length) return false
     for (const key of ak) {
-      if (!b || b[key] !== a[key]) return false;
+      if (!b || b[key] !== a[key]) return false
     }
-    return true;
+    return true
   }
-
 }

@@ -3,7 +3,6 @@ import { ConnectionState, TRANSITIONS } from './states.js';
 
 let nextSessionId = 1;
 
-// Re-exported for callers that already import the session module directly.
 export { ConnectionState };
 
 export class ConnectionSession {
@@ -17,21 +16,7 @@ export class ConnectionSession {
     this.state = ConnectionState.CONNECTED;
     this.closed = false;
     this.badPackets = 0;
-    this._sessionSeq = 0;
-    this._packetSeq = new Map();
     this.connMagic = null;
-  }
-
-  /**
-   * Allocate the next session_seq and packet_seq for packet type `typeId`.
-   * Returns { sessionSeq: u32, packetSeq: u08 } for the outbound header.
-   */
-  nextOutboundSeq(typeId) {
-    this._sessionSeq = (this._sessionSeq + 1) >>> 0;
-    const prev = this._packetSeq.get(typeId) ?? 0;
-    const seq = (prev + 1) & 0xff;
-    this._packetSeq.set(typeId, seq);
-    return { sessionSeq: this._sessionSeq, packetSeq: seq };
   }
 
   markPacket(now = Date.now()) {

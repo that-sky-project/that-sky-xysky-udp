@@ -102,10 +102,9 @@ All configuration lives in **`config.yml`** (loaded from the working directory).
 reads **no environment variables** — `config.yml` is the single source of configuration.
 
 ```yaml
-env: development          # development | test | production
 logging:
   level: info             # pino level; use "debug" for protocol diagnostics
-  pretty: false           # human-readable logs (auto-enabled when env is development)
+  pretty: false           # human-readable logs
 
 room:
   host: 0.0.0.0           # ENet UDP bind address
@@ -117,7 +116,6 @@ room:
   max_packet_bytes: 16384 # max accepted client packet size
   bad_packet_limit: 8     # close a session after this many malformed packets
   move_timeout_ms: 20000  # revert a stuck MOVING session to ACTIVE after this (ms)
-  move_targets: []        # optional static migration targets
   player_state_decode: full  # full | basic (basic = position + velocity only)
 
 qwd:
@@ -126,7 +124,6 @@ qwd:
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `env` | `development` | Runtime environment |
 | `logging.level` | `info` | Pino log level |
 | `logging.pretty` | `false` | Pretty logs (forced on in `development`) |
 | `room.host` | `0.0.0.0` | ENet UDP bind address |
@@ -138,7 +135,6 @@ qwd:
 | `room.max_packet_bytes` | `16384` | Maximum client packet size |
 | `room.bad_packet_limit` | `8` | Malformed-packet limit before the session is closed |
 | `room.move_timeout_ms` | `20000` | Revert a session stuck in MOVING back to ACTIVE after this |
-| `room.move_targets` | `[]` | Static migration targets (JSON/YAML array) |
 | `room.player_state_decode` | `full` | `full` parses every `PlayerState` field; `basic` reads only `stateKind` + position + velocity |
 | `qwd.url` | `""` | QWD WebSocket URL. **Empty = standalone, no manager connection.** |
 

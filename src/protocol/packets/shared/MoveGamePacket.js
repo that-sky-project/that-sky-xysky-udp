@@ -9,14 +9,6 @@ export class MoveGamePacket {
   static id = PacketIds.MoveGame;
   static name = 'MoveGamePacket';
 
-  // Wire format (Server→Client), reversed from sub_140e14630 + sub_140e18100:
-  //   raw_bytes_32  u08[32]    — unknown 32-byte block at struct+0x4c
-  //   move          Move       — serialized by sub_140e142d0
-  //   u32_field     u32        — stored at struct+0x5c
-  //   u08_field     u08        — stored at struct+0xbc
-  //   u32_field2    u32        — stored at struct+0x60
-  //   is_split      bool       — if true, triggers split-move flow on client
-  //   destination_uuid u08[16] — destination room UUID at struct+0xc9
   static encode(writer, packet) {
     const rawBytes32 = Buffer.from(packet.rawBytes32 ?? Buffer.alloc(32));
     if (rawBytes32.length !== 32) {
@@ -43,17 +35,10 @@ export class MoveGamePacket {
 
     writer.writeUInt32(packet.u32Field ?? 0);
     writer.writeUInt8(packet.u08Field ?? 0);
-    // u32Field2 lands in the client's matchmaking reservation slot (state+420)
-    // when the move is accepted. 0xFFFFFFFF means "no event reservation"; a
-    // plain 0 here leaves the client in a phantom reservation state that makes
-    // every later generic mm signal ("EventId 0") get rejected, deadlocking
-    // reconnection until the next non-generic move.
+  
     writer.writeUInt32(packet.u32Field2 ?? 0xFFFFFFFF);
     writer.writeBool(packet.isSplit);
 
-    // destination_uuid identifies the destination room. Statically configured
-    // move targets have no known uuid, so keep the legacy zeroed encoding there;
-    // the QWD command path validates the room uuid before reaching this point.
     const rawDest = packet.destinationUuid;
     const destUuid = rawDest instanceof TgcUuid ? rawDest : new TgcUuid(rawDest != null ? rawDest : Buffer.alloc(16));
     destUuid.encode(writer);

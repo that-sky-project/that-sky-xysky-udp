@@ -2,14 +2,26 @@ import { PacketIds } from '../../protocol/PacketIds.js';
 import { ConnectionState } from '../../connection/states.js';
 
 export class JoinService {
-  constructor({ players, levels, broadcaster, logger, metrics, migration, onPlayerJoined }) {
+  constructor({ players, levels, levelService, broadcaster, logger, metrics, migration, onPlayerJoined, onEvict }) {
     this.players = players;
     this.levels = levels;
+    this._levelService = levelService;
     this.broadcaster = broadcaster;
     this.logger = logger;
     this.metrics = metrics;
     this.migration = migration;
     this.onPlayerJoined = onPlayerJoined;
+    this.onEvict = onEvict;
+  }
+
+  evictSession(previous) {
+    this.logger?.warn({
+      uuid: previous.uuid?.toString?.(),
+      oldPeerId: previous.session?.peerId?.toString?.()
+    }, 'uuid reconnected; evicting the previous session');
+    this.players.removeBySession(previous.session);
+    this._levelService?.releaseAuthority(previous, 'session_evicted');
+    this.onEvict?.(previous);
   }
 
   join(session, payload) {
@@ -19,6 +31,11 @@ export class JoinService {
 
     const migrationRoster = this.migration?.claim?.(session, payload) ?? undefined;
     const playerId = migrationRoster?.entries.find(entry => entry.uuid.toString() === payload.uuid.toString())?.netId;
+
+    const previous = this.players.getByUuid(payload.uuid.toString());
+    if (previous && previous.session !== session) {
+      this.evictSession(previous);
+    }
 
     let player;
     try {
@@ -69,15 +86,10 @@ export class JoinService {
     this.metrics.onlinePlayers.set(this.players.size);
     this.onPlayerJoined?.(player);
 
-    // setAuthority triggers the onAuthorityElected event on LevelStateStore,
-    // which RoomServer subscribes to for sending NetLevelDataElect.
     const authority = this.levels.getAuthority(player.levelId);
     if (!authority) {
       this.levels.setAuthority(player.levelId, player, { reason: 'join_first_player' });
     } else {
-      // Authority already exists — fire a synthetic elect-notify for the joining player.
-      // We trigger the event handlers manually here so RoomServer can send the Elect
-      // to the joiner without changing the stored authority.
       for (const handler of this.levels._authorityElectedHandlers) {
         handler(player.levelId, authority, player);
       }

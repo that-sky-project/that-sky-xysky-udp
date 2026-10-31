@@ -25,7 +25,6 @@ const RECEIVER_UUID_OFFSET = 18;
 const RECEIVER_UUID_LENGTH = 16;
 const MIN_GIFT_LENGTH = RECEIVER_UUID_OFFSET + RECEIVER_UUID_LENGTH;
 
-/** Decode a gift RPC payload into a structured object. */
 export function decodeGiftRpc(rpcData) {
   if (!Buffer.isBuffer(rpcData) || rpcData.length < MIN_GIFT_LENGTH) {
     return null;
@@ -41,11 +40,6 @@ export function decodeGiftRpc(rpcData) {
   };
 }
 
-/**
- * Return a copy of rpcData with receiverUuid patched in.
- * Called by the server when forwarding a type_flag=Accept message to the sender:
- * the client needs a non-zero UUID here to complete /account/give_candle.
- */
 export function patchGiftReceiverUuid(rpcData, uuidBytes) {
   const patched = Buffer.from(rpcData);
   uuidBytes.copy(patched, RECEIVER_UUID_OFFSET);

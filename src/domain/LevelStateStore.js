@@ -6,12 +6,11 @@ export class LevelStateStore {
     this.logger = logger;
     this.authorities = new Map();
     this.penalizedAuthorityCandidates = new Map();
+    /** levelId -> the authority's serialized level state. */
     this.levelData = new Map();
     this._authorityElectedHandlers = [];
   }
 
-  // Subscribe to authority election events.
-  // Callback signature: (levelId: number, authority: Player) => void
   onAuthorityElected(callback) {
     this._authorityElectedHandlers.push(callback);
   }
@@ -98,8 +97,13 @@ export class LevelStateStore {
     if (penalized.size === 0) this.penalizedAuthorityCandidates.delete(levelId);
   }
 
+  forgetLevelData(levelId) {
+    this.levelData.delete(levelId);
+  }
+
   saveLevelData(levelId, data) {
     const authority = this.getAuthority(levelId);
+    const payload = Buffer.from(data.payload ?? Buffer.alloc(0));
     this.levelData.set(levelId, {
       electedPlayer: authority?.id ?? data.authorityPlayerId ?? 0,
       mergeState: data.mergeState ?? 0,
@@ -110,8 +114,8 @@ export class LevelStateStore {
       unknown4: data.unknown4 ?? 0,
       unknown5: data.unknown5 ?? 0,
       unknown6: data.unknown6 ?? 0,
-      dataLength: data.payload?.length ?? 0,
-      payload: Buffer.from(data.payload ?? Buffer.alloc(0)),
+      dataLength: payload.length,
+      payload,
       updatedAt: data.updatedAt ?? Date.now(),
       authorityPlayerId: data.authorityPlayerId
     });
@@ -139,16 +143,19 @@ export class LevelStateStore {
       ...this.authorities.keys(),
       ...this.penalizedAuthorityCandidates.keys(),
       ...this.levelData.keys()
-    ])).map(levelId => ({
-      roomId: this.roomId,
-      levelId,
-      authorityPlayerId: this.authorities.get(levelId)?.id,
-      penalizedAuthorityPlayerIds: Array.from(this.penalizedAuthorityCandidates.get(levelId) ?? [], player => player.id),
-      hasLevelData: this.levelData.has(levelId),
-      levelDataBytes: this.levelData.get(levelId)?.payload?.length ?? 0,
-      levelHash: this.levelData.get(levelId)?.levelHash ?? 0,
-      mergeState: this.levelData.get(levelId)?.mergeState ?? 0,
-      updatedAt: this.levelData.get(levelId)?.updatedAt
-    }));
+    ])).map(levelId => {
+      const state = this.levelData.get(levelId);
+      return {
+        roomId: this.roomId,
+        levelId,
+        authorityPlayerId: this.authorities.get(levelId)?.id,
+        penalizedAuthorityPlayerIds: Array.from(this.penalizedAuthorityCandidates.get(levelId) ?? [], player => player.id),
+        hasLevelData: Boolean(state),
+        levelDataBytes: state?.payload?.length ?? 0,
+        levelHash: state?.levelHash ?? 0,
+        mergeState: state?.mergeState ?? 0,
+        updatedAt: state?.updatedAt
+      };
+    });
   }
 }

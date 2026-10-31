@@ -1,13 +1,16 @@
 import { PacketIds } from '../../protocol/PacketIds.js';
 
+const DEFAULT_SCALAR = 0;
+
 export function handlePing(session, payload, { broadcaster, clock }) {
-  const recv = clock();
+  const now = clock();
   broadcaster.send(session, {
     id: PacketIds.NetTimePong,
     payload: {
       requestId: payload.requestId,
-      serverRecvTime: recv,
-      serverSendTime: clock()
+      serverTime: now,
+      reserved: 0,
+      scalar: DEFAULT_SCALAR
     }
   });
 }

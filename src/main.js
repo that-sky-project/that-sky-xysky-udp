@@ -43,6 +43,8 @@ async function bootstrap() {
     roomId: config.room.id
   }, 'starting server');
 
+  for (const warning of config.debug.warnings) logger.warn(warning);
+
   try {
     await room.start();
     logger.info({

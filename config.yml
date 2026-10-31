@@ -1,7 +1,6 @@
-env: development
 logging:
   level: info
-  pretty: false
+  pretty: true
 
 room:
   host: 0.0.0.0
@@ -9,7 +8,7 @@ room:
   # Public UDP endpoint reported to qwd. This is intentionally separate from host.
   public_uri: 192.168.11.4:19133
   max_peers: 64
-  channels: 2
+  channels: 1
   tick_rate: 10
   max_packet_bytes: 16384
   bad_packet_limit: 8
@@ -25,7 +24,6 @@ room:
   # The first frame per player is always decoded in full to detect which
   # client build it is; later frames use the cheap path.
   player_state_decode: full
-  move_targets: []
 
 # Room Authority / Room Manager (QWD) link.
 # Leave url empty to run this node standalone as a single 8-player room:

@@ -4,17 +4,6 @@ import { BinaryWriter } from '../binary/BinaryWriter.js';
 import { PLAYER_STATE_MAX_BYTES } from '../snapshot/constants.js';
 import { ProtocolError } from '../../errors.js';
 
-// Sky.exe 0.35.1 (HotFix 1): sub_140C9F280 and the serializers it calls.
-// Native object offsets remain as IDs where no stable semantic name is known.
-//
-// Cross-checked against the symbolized 0.15.1 libBootloader.so build, which
-// still carries the same layout for most sub-records:
-//   PlayerState::m_SerializeNet / Move / Body / QueuedState / Action / Energy /
-//   Anim / Outfit / WorldQuests, plus PlayerId::Serialize, OutfitState::Serialize
-//   and PlayerQueuedState::Serialize.
-// That build fixes the semantics of several fields (see OUTFIT_SLOTS, dynU8 and
-// the `suspected:` notes below). Where the two builds disagree, the 0.35.1
-// serializer wins — noted inline at each such site.
 export const PLAYER_STATE_FIELD_SCHEMA = Object.freeze([
   ['stateKind', 'bounded-u8', 0, 4, 'state+0xb0'],
   ['position', 'vector3<float32>', 'state+0x5990'],

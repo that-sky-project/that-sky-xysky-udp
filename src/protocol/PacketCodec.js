@@ -12,9 +12,6 @@ export class PacketCodec {
     const packetType = packetTypes.get(id);
 
     if (!packetType?.decode) {
-      // 0.35.1 client sends outer id 16 (0-byte keepalive/probe). Both
-      // Pending (0x140E85320) and Active (0x140E85480) have no handler
-      // for it and just log Unknown — keep compat by swallowing it.
       const raw = reader.remaining > 0 ? reader.readBytes(reader.remaining) : Buffer.alloc(0);
       return {
         id,

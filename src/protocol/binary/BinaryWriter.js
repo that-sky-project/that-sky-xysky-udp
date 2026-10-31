@@ -12,6 +12,35 @@ export class BinaryWriter {
     }
   }
 
+  /**
+   * Byte-aligned little-endian write — the client's `sub_1400372F0`.
+   *
+   * Mirrors {@link BinaryReader.readAlignedUInt}: the field starts on a byte
+   * boundary, so any partial byte is closed first. The profile record mixes
+   * these with bit-stream writes, and treating the whole thing as one bit
+   * stream is what produced drifting, undecodable payloads.
+   *
+   * @param {number} value field value
+   * @param {number} bytes field width in bytes
+   */
+  writeAlignedUInt(value, bytes) {
+    if (!Number.isInteger(bytes) || bytes < 1 || bytes > 8) {
+      throw new RangeError(`invalid aligned width: ${bytes}`);
+    }
+    this.alignToByte();
+    const numeric = BigInt.asUintN(
+      bytes * 8,
+      typeof value === 'bigint' ? value : BigInt(Math.trunc(Number(value) || 0))
+    );
+    this.ensure(bytes);
+    let remaining = numeric;
+    for (let index = 0; index < bytes; index += 1) {
+      this.buffer[this.offset + index] = Number(remaining & 0xffn);
+      remaining >>= 8n;
+    }
+    this.offset += bytes;
+  }
+
   ensure(size) {
     const required = this.offset + size;
     if (required <= this.buffer.length) {
