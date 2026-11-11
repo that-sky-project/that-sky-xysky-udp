@@ -10,8 +10,9 @@ export function estimateFrameBytes (frame) {
   for (const entity of frame.entities) {
     if (!entity.active) continue
     bits += 1
-    if (entity.hasData) bits += 1 + 3 + 4
-    bits += 1
+    if (entity.commitRecord !== false && entity.hasData !== false) {
+      bits += 1 + 3 + 4
+    }
     positions += 6
   }
   return FRAME_HEADER_BYTES + Math.ceil(bits / 8) + positions
@@ -107,8 +108,12 @@ export function buildFrame (
     }
     entities.push({
       active: true,
-      hasData: entity.hasData !== false,
-      inThisRoom: memberSet.has(index),
+      // commitRecord: the client commits the full 0x235-byte render record
+      // this frame when true. Room-mates (id-22 members) render as full
+      // birds; every other silhouette renders from the position-only path.
+      // (Field was misnamed `inThisRoom` before the R2 rename — membership
+      // itself is decided client-side from the id-22 list, never on this bit.)
+      commitRecord: memberSet.has(index) && entity.hasData !== false,
       flag7: entity.flag7 ?? 0,
       type: entity.type ?? 0,
       extraVal: entity.extraVal ?? 0,
@@ -155,7 +160,6 @@ export function buildFrames (
           variableBits += 1 + 7 + 4
           if (((entity?.type ?? 0) & 0xfe) === 0x0e) variableBits += 9
         }
-        variableBits += 1
       }
       const slots = index - startIdx + 1
       const estimate =

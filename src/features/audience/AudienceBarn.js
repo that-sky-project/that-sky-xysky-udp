@@ -48,11 +48,17 @@ export class AudienceBarn {
   constructor ({
     entityLimit = AUDIENCE_MAX_ENTITY,
     pageSegments = PAGE_SEGMENTS,
-    logger = console
+    logger = console,
+    clock = null
   } = {}) {
     this.entityLimit = entityLimit
     this.pageSegments = Math.max(1, Math.floor(pageSegments))
     this.logger = logger
+    // Seconds-resolution clock of the node that OWNS this barn. When set,
+    // every sample is clamped into this clock domain on write — cross-room
+    // seats arrive stamped with the source node's wall clock, and an ahead
+    // source would future-stamp them (see pushPosition).
+    this.clock = typeof clock === 'function' ? clock : null
     this.entities = new Map()
     this.occupants = new Map()
     this.dirtyEntities = new Set()
@@ -71,7 +77,6 @@ export class AudienceBarn {
         seatId,
         playerId: null,
         flags: AUDIENCE_ENTITY_FLAGS_OUTSIDE_ROOM,
-        inThisRoom: false,
         flag7: 0,
         type: 0,
         extra: null,
@@ -137,6 +142,27 @@ export class AudienceBarn {
     }
     return index
   }
+  /**
+   * Clamp an inbound sample's timestamp into THIS node's clock domain.
+   *
+   * Client rejection rule (sub_114556C): a sample whose levelTime sits in the
+   * past window (-5s, 0) relative to the entity's previous stamp is dropped,
+   * and `latestPosition` skips any slot stamped ahead of the query time. A
+   * remote seat stamped with the SOURCE node's wall clock therefore breaks
+   * asymmetrically: a source running ahead future-stamps the ghost here, and
+   * every query below `now` returns null -> the bird never renders (the
+   * one-way-visibility bug); a source running behind self-heals on the next
+   * resample. Clamping inbound stamps to local now (never backwards past the
+   * entity's own newest sample, which is the out-of-order guard's job) makes
+   * every query resolvable.
+   */
+  #clampLevelTime (levelTime) {
+    const raw = Number(levelTime)
+    if (!Number.isFinite(raw) || this.clock === null) return raw
+    const now = this.clock()
+    return raw > now ? now : raw
+  }
+
   pushPosition (
     index,
     position,
@@ -145,19 +171,20 @@ export class AudienceBarn {
   ) {
     const entity = this.entities.get(index)
     if (!entity) return false
+    const stamped = this.#clampLevelTime(levelTime)
     const newest = entity.history[entity.historyCursor % AUDIENCE_HISTORY_SLOTS]
     const reference = newest?.time ?? entity.updatedAt ?? 0
-    if (levelTime < reference - AUDIENCE_OUT_OF_ORDER_TOLERANCE_SECONDS)
+    if (stamped < reference - AUDIENCE_OUT_OF_ORDER_TOLERANCE_SECONDS)
       return false
     if (
-      levelTime === reference &&
+      stamped === reference &&
       newest &&
       entity.sampleCount >= AUDIENCE_HISTORY_MIN_SAMPLES
     )
       return false
     const cursor = entity.historyCursor
     entity.history[cursor % AUDIENCE_HISTORY_SLOTS] = {
-      time: levelTime,
+      time: stamped,
       position: [...position],
       valid
     }
@@ -166,7 +193,7 @@ export class AudienceBarn {
       (entity.sampleCount ?? 0) + 1,
       AUDIENCE_HISTORY_SLOTS * 2
     )
-    entity.updatedAt = levelTime
+    entity.updatedAt = stamped
     entity.position = [...position]
     if (markDirty) this.dirtyEntities.add(index)
     return true

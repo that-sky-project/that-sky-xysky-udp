@@ -156,6 +156,12 @@ export class RoomServer {
       logger,
       packetDebug: this.packetDebug,
       currentLevelOf: playerId => this.players.getByUuid(playerId)?.levelId,
+      // Audience frames and every barn sample share one clock domain: the
+      // local wall clock (seconds). Cross-room ghost seats arrive stamped
+      // with the source node's wall clock; without a shared clamp a source
+      // running ahead future-stamps its birds here and they never render
+      // (the one-way-visibility bug).
+      barnClock: () => Date.now() / 1000,
       onPositionChanged: (playerId, roster, position, levelTime) => {
         this.qwd.publish('seat.occupied', {
           roomId: this.config.id,

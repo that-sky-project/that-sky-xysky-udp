@@ -30,9 +30,15 @@ export class AudienceService {
     currentLevelOf,
     logger = console,
     clock = () => Date.now(),
-    packetDebug
+    packetDebug,
+    barnClock
   } = {}) {
-    this.barn = barn ?? new AudienceBarn({ logger })
+    // The barn's clock domain IS the frame clock domain: broadcastFrame is
+    // called with Date.now()/1000 and latestPosition is queried at that same
+    // levelTime, so clamping inbound samples (remote seats, telemetry) to the
+    // same clock keeps them resolvable regardless of the source node's skew.
+    this.barn =
+      barn ?? new AudienceBarn({ logger, clock: barnClock ?? (() => Date.now() / 1000) })
     this.sendToClient = sendToClient
     this.packetDebug = packetDebug
     this.onPositionChanged = onPositionChanged
@@ -266,7 +272,7 @@ export class AudienceService {
         for (const entity of frame.entities) {
           if (!entity.active) continue
           activeTotal += 1
-          if (entity.inThisRoom) inRoomTotal += 1
+          if (entity.commitRecord) inRoomTotal += 1
         }
       }
     }
