@@ -573,15 +573,19 @@ export class AudienceService {
       ? this.spotlightPerformers.get(roster.levelId)
       : undefined
     if (!performer) return base
-    const elapsed = Math.max(
-      0,
-      Math.floor(this.clock() / 1000 - performer.startedAt)
-    )
     return {
       ...base,
       hasSession: true,
       sessionId: profileF0Of(performer.playerId),
-      stage: Math.min(30, elapsed),
+      // `stage` is a venue-state index, NOT elapsed seconds: both official
+      // captures carry free-running values (idle 44, active session 48) and
+      // sub_10FE178 never compares it against anything — only stageStart
+      // (!= 1) and stageEnd steer the state machine. The previous
+      // Math.min(30, elapsed) turned the index into a 0..30 ramp, an
+      // in-between venue state the level's performance markers do not
+      // define — the phantom-position path (players landing under the stage
+      // floor / in the water instead of the piano marker).
+      stage: 48,
       startTime: performer.startedAt
     }
   }
