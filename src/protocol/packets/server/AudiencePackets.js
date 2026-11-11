@@ -79,25 +79,29 @@ export class AudiencePacket {
 export class AudienceRoomIdsPacket {
   static id = AudiencePacketId.AudienceRoomIds
   static name = 'AudienceRoomIdsPacket'
+  // Capture-verified (packetdump_20261030203945, 60 packets): after count +
+  // the 14-bit member indices the official server always writes the same
+  // 6-bit LSB-first sequence 1,0,0,0,0,1 (== 0x21 read LSB-first). The
+  // client's parser (sub_1157808) never consumes it, so its meaning is
+  // unconfirmed — but reproducing it keeps our wire byte-identical to the
+  // official server's, which is the safest position for future client
+  // updates. The previous 5-bit `tail` (constant 9) was invented from an
+  // ambiguous read of one packet and produced different trailing bytes.
+  static TAIL_BITS = [1, 0, 0, 0, 0, 1]
   static decode (reader) {
     const count = reader.readCompressed(ROOM_MEMBER_MAX)
     const indices = []
     for (let i = 0; i < count; i += 1)
       indices.push(reader.readCompressed(ENTITY_INDEX_MAX))
-    const tail =
-      reader.remainingBits >= ROOM_IDS_TAIL_BITS
-        ? reader.readBits(ROOM_IDS_TAIL_BITS)
-        : 0
-    return { count, indices, tail }
+    const tailBits = []
+    while (reader.remainingBits > 0) tailBits.push(reader.readBool())
+    return { count, indices, tailBits }
   }
   static encode (writer, packet) {
     const indices = (packet.indices ?? []).slice(0, ROOM_MEMBER_MAX)
     writer.writeCompressed(indices.length, ROOM_MEMBER_MAX)
     for (const index of indices) writer.writeCompressed(index, ENTITY_INDEX_MAX)
-    writer.writeBits(
-      Math.min(packet.tail ?? ROOM_IDS_TAIL, ROOM_IDS_TAIL_MAX),
-      ROOM_IDS_TAIL_BITS
-    )
+    for (const bit of this.TAIL_BITS) writer.writeBool(bit === 1)
   }
 }
 export class AudienceReliableDataPacket {

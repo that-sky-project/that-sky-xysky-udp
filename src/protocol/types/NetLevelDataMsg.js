@@ -2,6 +2,20 @@ import { BinaryReader } from '../binary/BinaryReader.js'
 import { BinaryWriter } from '../binary/BinaryWriter.js'
 import { NET_LEVEL_DATA_MAX_BYTES } from '../snapshot/constants.js'
 import { ProtocolError } from '../../errors.js'
+
+/**
+ * NetLevelData message — layout captured byte-exact from the official server
+ * (packetdump_20261030203945, GameMsg type 11), verified by bit-level probe:
+ * the levelId dword sits at bit 40 of the payload, i.e. after
+ * [electedPlayer u8][unknown0 u8][unknown1 u16][hasInitialData 1 bit + pad].
+ *
+ * The previous implementation read [electedPlayer][levelId][unknown1]
+ * [hasInitialData] — levelId landed three bytes early and silently became
+ * 0x01000101 on every official packet, and re-encoding corrupted byte 8
+ * (levelId's high byte was replaced with 0x00). That encoder feeds
+ * syncLevelData and sendElect, so every new joiner received a corrupted
+ * level id in their initial world state.
+ */
 export function decodeNetLevelDataMsg (buffer, options = {}) {
   const reader =
     buffer instanceof BinaryReader ? buffer : new BinaryReader(buffer)
@@ -10,16 +24,19 @@ export function decodeNetLevelDataMsg (buffer, options = {}) {
     reader.skip(skipHeaderBytes)
   }
   const electedPlayer = reader.readUInt8()
-  const levelId = reader.readUInt32()
+  const unknown0 = reader.readUInt8()
   const unknown1 = reader.readUInt16()
   const hasInitialData = reader.readBool()
+  reader.alignToByte()
+  const levelId = reader.readUInt32()
   const netLevelData = readNetLevelData(reader, options)
   const remaining = reader.remaining
   return {
     electedPlayer,
-    levelId,
+    unknown0,
     unknown1,
     hasInitialData,
+    levelId,
     ...netLevelData,
     trailingBytes: remaining
   }
@@ -29,6 +46,7 @@ export function encodeNetLevelDataMsg ({
   levelId,
   levelData = Buffer.alloc(0),
   mergeState = 0,
+  unknown0 = 1,
   unknown1 = 0,
   unknown2 = 0,
   unknown3 = 0,
@@ -46,9 +64,10 @@ export function encodeNetLevelDataMsg ({
   }
   const writer = new BinaryWriter(64 + levelData.length)
   writer.writeUInt8(electedPlayer)
-  writer.writeUInt32(levelId)
+  writer.writeUInt8(unknown0)
   writer.writeUInt16(unknown1)
   writer.writeBool(hasInitialData)
+  writer.writeUInt32(levelId)
   writer.writeUInt16(unknown2)
   writer.writeUInt8(unknown3)
   writer.writeUInt32(unknown4)
