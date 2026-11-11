@@ -673,11 +673,20 @@ function playerIdOf (session) {
   return undefined
 }
 const POSITION_REPORT_EPSILON = 0.25
+/**
+ * Idle stream shape, from the official-server capture (test golden wire
+ * '8280fa00...'): startIdx=129/endIdx=500 are the last window the show
+ * rendered (stored values — the wire is signed-bounded, wire = stored+1),
+ * stage 44 + stageStart 90 tell the client the venue is open but no session
+ * is running, and startTime anchors the stage clock on a 30 s grid so every
+ * client agrees on the current stage phase. Values are from the capture; do
+ * not invent new magic numbers without one.
+ */
 function defaultStreamInfo () {
   return {
-    startIdx: 123,
+    startIdx: 129,
     hasStart: false,
-    endIdx: 501,
+    endIdx: 500,
     hasEnd: false,
     flags: [false, false, false, false, false],
     hasDetail: true,

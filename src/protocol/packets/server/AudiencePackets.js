@@ -17,6 +17,10 @@ import {
   writeAudiencePosition
 } from '../../types/Audience.js'
 const ENTITY_INDEX_MAX = AUDIENCE_MAX_ENTITY_INDEX
+// StreamInfo index fields are signed-bounded [-1, 10203] on the wire
+// (sub_1A81EC4 via sub_2955448); 10203 = the entity-slot ceiling, one above
+// the 10143 room-member ceiling.
+const STREAM_INFO_INDEX_MAX = 10203
 const ROOM_MEMBER_MAX = AUDIENCE_ROOM_MEMBER_LIMIT
 const ROOM_IDS_TAIL_BITS = 5
 const ROOM_IDS_TAIL_MAX = 0x1f
@@ -205,10 +209,28 @@ export const AudienceChatDownUnreliablePacket = new AudienceChatDownPacket(
 export class AudienceStreamInfoPacket {
   static id = AudiencePacketId.AudienceStreamInfo
   static name = 'AudienceStreamInfoPacket'
+  // sub_1A81EC4 reads both index fields with the signed-bounded primitive
+  // sub_2955448(-1, 10203): wire value = stored value + 1, bit width
+  // ceil(log2(10203 - (-1) + 1)) = 14. The node used compressed(0..10143)
+  // — same width, but off by one against the client's stored-value mapping.
+  static #readIndex (reader) {
+    const encoded = reader.readBits(
+      Math.ceil(Math.log2(STREAM_INFO_INDEX_MAX + 2))
+    )
+    return encoded - 1
+  }
+  static #writeIndex (writer, value) {
+    const stored = (Number.isInteger(value) ? value : 0) + 1
+    const bits = Math.ceil(Math.log2(STREAM_INFO_INDEX_MAX + 2))
+    if (stored < 0 || stored > STREAM_INFO_INDEX_MAX + 1) {
+      throw new RangeError(`stream index ${value} outside [-1, ${STREAM_INFO_INDEX_MAX}]`)
+    }
+    writer.writeBits(stored, bits)
+  }
   static decode (reader) {
-    const startIdx = reader.readCompressed(ENTITY_INDEX_MAX)
+    const startIdx = this.#readIndex(reader)
     const hasStart = reader.readBool()
-    const endIdx = reader.readCompressed(ENTITY_INDEX_MAX)
+    const endIdx = this.#readIndex(reader)
     const hasEnd = reader.readBool()
     const flags = [
       reader.readBool(),
@@ -239,9 +261,9 @@ export class AudienceStreamInfoPacket {
       writer.writeBytes(Buffer.from(packet.raw))
       return
     }
-    writer.writeCompressed(packet.startIdx ?? 0, ENTITY_INDEX_MAX)
+    this.#writeIndex(writer, packet.startIdx ?? 0)
     writer.writeBool(packet.hasStart === true)
-    writer.writeCompressed(packet.endIdx ?? 0, ENTITY_INDEX_MAX)
+    this.#writeIndex(writer, packet.endIdx ?? 0)
     writer.writeBool(packet.hasEnd === true)
     const flags = packet.flags ?? []
     for (let i = 0; i < 5; i += 1) writer.writeBool(flags[i] === true)
