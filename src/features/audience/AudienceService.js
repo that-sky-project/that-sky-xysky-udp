@@ -318,8 +318,10 @@ export class AudienceService {
     }
     return {
       start: this.timeline.start,
-      end: this.timeline.start + step,
-      flags: 0
+      end: this.timeline.start + step
+      // Optional blocks (struct / 4 consensus floats / 9 vec4s) stay absent:
+      // the official capture carries bare 2.5 s windows, and a populated
+      // float needs a real consensus source (AudienceConsensusVote) first.
     }
   }
   async broadcastTimeline (now = this.clock() / 1000) {
@@ -630,21 +632,6 @@ export class AudienceService {
     })
     this.featureFlagsAnnounced = this.featureFlagsAnnounced ?? new Set()
     this.featureFlagsAnnounced.add(playerId)
-    setTimeout(() => {
-      Promise.resolve()
-        .then(() =>
-          this.sendToClient(playerId, {
-            id: AudiencePacketId.AudienceFeatureFlags,
-            payload: { b0: false, b1: true, b2: false, b3: false }
-          })
-        )
-        .catch(error => {
-          this.logger.debug?.(
-            { err: error, playerId },
-            'feature flags refresh failed'
-          )
-        })
-    }, 1000).unref?.()
   }
   async #sendRoomIds (playerId, memberIndices) {
     await this.sendToClient(playerId, {

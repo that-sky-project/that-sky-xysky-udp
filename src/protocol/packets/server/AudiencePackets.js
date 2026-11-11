@@ -156,11 +156,39 @@ export class SocialBroadcastDownPacket {
 export class AudienceConsensusPacket {
   static id = AudiencePacketId.AudienceConsensus
   static name = 'AudienceConsensusPacket'
+  // sub_1A803BC (asm-verified): the timeline doubles are followed by THIRTEEN
+  // optional-present bits, never a flags integer:
+  //   [hasStruct -> sub_1A82FD4 body when set]
+  //   4x [hasFn -> f32]                the NetworkedAudienceFloat consensus
+  //                                    slots 0-3 (see the kNetMsg strings:
+  //                                    "only four consensus floats, 0-3")
+  //   9x [hasVec -> 4x f32]            optional vec4 payloads
+  // The node previously wrote a u16 "flags" here; its low byte landed on
+  // hasStruct and any nonzero value made the client parse garbage. The
+  // official capture (18 bytes) is 2x f64 + 13 zero bits — all optionals
+  // absent.
   static decode (reader) {
     const start = reader.readDouble()
     const end = reader.readDouble()
-    const flags = reader.readUInt16() & 0x1fff
-    return { start, end, flags }
+    const out = { start, end }
+    out.hasStruct = reader.readBool()
+    if (out.hasStruct) out.struct = reader.readBytes(16)
+    out.floats = []
+    for (let i = 0; i < 4; i += 1) {
+      const present = reader.readBool()
+      if (present) out.floats.push({ slot: i, value: reader.readFloat() })
+    }
+    out.vectors = []
+    for (let i = 0; i < 9; i += 1) {
+      const present = reader.readBool()
+      if (present) {
+        out.vectors.push({
+          slot: i,
+          values: [reader.readFloat(), reader.readFloat(), reader.readFloat(), reader.readFloat()]
+        })
+      }
+    }
+    return out
   }
   static encode (writer, packet) {
     if (Buffer.isBuffer(packet.raw) || packet.raw instanceof Uint8Array) {
@@ -169,7 +197,26 @@ export class AudienceConsensusPacket {
     }
     writer.writeDouble(packet.start ?? 0)
     writer.writeDouble(packet.end ?? 0)
-    writer.writeUInt16((packet.flags ?? 0) & 0x1fff)
+    writer.writeBool(packet.hasStruct === true)
+    if (packet.hasStruct === true) {
+      writer.writeBytes(Buffer.from(packet.struct ?? Buffer.alloc(16)))
+    }
+    const floats = packet.floats ?? []
+    for (let i = 0; i < 4; i += 1) {
+      const entry = floats.find(f => f.slot === i)
+      const present = entry !== undefined && entry.value != null
+      writer.writeBool(present)
+      if (present) writer.writeFloat(entry.value)
+    }
+    const vectors = packet.vectors ?? []
+    for (let i = 0; i < 9; i += 1) {
+      const entry = vectors.find(v => v.slot === i)
+      const present = entry !== undefined && Array.isArray(entry.values)
+      writer.writeBool(present)
+      if (present) {
+        for (let k = 0; k < 4; k += 1) writer.writeFloat(entry.values[k] ?? 0)
+      }
+    }
   }
 }
 export class AudienceChatDownPacket {
