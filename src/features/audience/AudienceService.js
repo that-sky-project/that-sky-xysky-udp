@@ -20,6 +20,7 @@ import { BinaryReader } from '../../protocol/binary/BinaryReader.js'
 import { isAudienceLevel } from './AudienceLevels.js'
 import { AudienceSocial } from './AudienceSocial.js'
 import { profileF0Of } from './AudienceFrames.js'
+import { identityHashOfPlayerId } from '../../protocol/identityHash.js'
 export class AudienceService {
   constructor ({
     barn,
@@ -406,6 +407,12 @@ export class AudienceService {
       return
     }
     await this.broadcastPerformance({
+      // The client binds the JSON action to the entity whose profile f0
+      // equals this id and drops the packet when it matches its own hash
+      // (sub_115BA7C). It must be the performer's identity hash — without it
+      // the broadcast renders nowhere (the previous code omitted sessionId,
+      // so every client received id=0 and matched no entity).
+      sessionId: identityHashOfPlayerId(playerId) ?? 0n,
       time: request.timestamp,
       counter: request.actionId,
       json: payload,

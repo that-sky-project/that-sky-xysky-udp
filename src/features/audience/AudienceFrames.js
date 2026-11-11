@@ -1,4 +1,8 @@
 import { AUDIENCE_MAX_ENTITY_INDEX } from '../../protocol/types/Audience.js'
+import {
+  identityHashOfPlayerId,
+  fnv1a64
+} from '../../protocol/identityHash.js'
 const FRAME_HEADER_BYTES = 4 + 8 + 12
 export function estimateFrameBytes (frame) {
   let bits = frame.entities.length
@@ -13,6 +17,11 @@ export function estimateFrameBytes (frame) {
   return FRAME_HEADER_BYTES + Math.ceil(bits / 8) + positions
 }
 export function hashEntity (index, playerId) {
+  // Deterministic per-(entity, player) appearance seed — this ONLY drives the
+  // server-chosen cosmetic fields (f12/f17/f18/f19, gesture queue). It must
+  // NOT produce the profile identity `f0`: the client compares f0 against
+  // FNV-1a-64 of the uuid's raw bytes (see identityHash.js), and an f0 that
+  // doesn't match makes every room-mate binding and performer lookup miss.
   const text = `${index}:${playerId ?? ''}`
   let h1 = 0x811c9dc5
   let h2 = 0x01000193
@@ -24,29 +33,37 @@ export function hashEntity (index, playerId) {
   const h3 = Math.imul(h1 ^ h2, 0xc2b2ae35) >>> 0
   const h4 = Math.imul(h2 ^ (h1 >>> 13), 0x27d4eb2f) >>> 0
   return {
-    u64: h1 * 2 ** 32 + h3,
-    u64Big: (BigInt(h1) << 32n) | BigInt(h3),
-    u32: h2,
     appearance: 5 + (h1 % 249),
     a: h2 & 0xff,
     b: h3 & 0xff,
     c: h4 & 0xff,
+    u32: h2,
     f62: 1 + (h1 % 8),
     f68: 0,
     v: h4
   }
 }
+
+/**
+ * The profile identity `f0` a client matches against:
+ * FNV-1a-64 over the uuid's 16 raw bytes (identityHash.js). Returns null for
+ * a non-uuid id — callers then omit f0 entirely so the client falls back to
+ * its LCG(entityIdx) random appearance instead of binding to a fake identity.
+ */
 export function profileF0Of (playerId) {
-  if (!playerId) return undefined
-  const text = String(playerId)
-  let h1 = 0x811c9dc5
-  let h2 = 0x01000193
-  for (let i = 0; i < text.length; i += 1) {
-    const code = text.charCodeAt(i)
-    h1 = Math.imul(h1 ^ code, 0x01000193) >>> 0
-    h2 = Math.imul(h2 + code, 0x01000193) >>> 0
-  }
-  return (BigInt(h1) << 32n) | BigInt(h2)
+  if (playerId === null || playerId === undefined) return undefined
+  return identityHashOfPlayerId(String(playerId))
+}
+
+/**
+ * 64-bit seed derived from the identity hash, used where a plain number is
+ * needed (legacy callers). Kept byte-exact with the identity hash so
+ * seed-based values stay stable across the R1 migration.
+ */
+export function identitySeedOf (playerId) {
+  const hash = profileF0Of(playerId)
+  if (hash === null || hash === undefined) return undefined
+  return Number(fnv1a64(Buffer.from(hash.toString(16).padStart(16, '0'), 'hex')))
 }
 export function suggestOrigin (barn) {
   let minX = Infinity,
@@ -201,10 +218,15 @@ export function buildProfileChunks (
       nowSeconds,
       stage.has(entity.playerId)
     )
+    // f0 is ONLY the client-matching identity hash. When the player id isn't
+    // a uuid (shouldn't happen in production) leave f0 unset — the client's
+    // LCG(entityIdx) path renders a deterministic random bird instead of
+    // binding the entity to a number nobody else computes.
+    const f0 = entity.profileF0 ?? profileF0Of(entity.playerId)
     return {
       entityIdx: index,
       profile: {
-        f0: entity.profileF0 ?? profileF0Of(entity.playerId) ?? seed.u64Big,
+        ...(f0 !== null && f0 !== undefined ? { f0 } : {}),
         f12: seed.appearance,
         f17: seed.a,
         f18: seed.b,
