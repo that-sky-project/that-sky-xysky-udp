@@ -17,8 +17,15 @@ export class QwdClient {
     onRoomIdConflict,
     onConnected,
     onTransportDropped,
-    snapshot
+    snapshot,
+    socketFactory = (url, options) => new WebSocket(url, options),
+    backpressureLimitBytes = 1024 * 1024
   }) {
+    this.socketFactory = socketFactory
+    this.backpressureLimitBytes = backpressureLimitBytes
+    this.commandResults = new Map()
+    this.queuedCommands = 0
+    this.connectionEpoch = 0
     this.url = url
     this.room = room
     this.nodeId = randomUUID()
@@ -62,6 +69,16 @@ export class QwdClient {
   }
   publish (event, data) {
     const message = JSON.stringify({ v: 1, event, data })
+    const performance = event.startsWith('performance.') || event === 'audience.reaction'
+    if (performance && (!this.connected || this.socket?.readyState !== WebSocket.OPEN)) {
+      this.logger.warn?.({ event }, 'QWD control send rejected: offline')
+      return false
+    }
+    if (this.socket?.readyState === WebSocket.OPEN &&
+      this.socket.bufferedAmount + Buffer.byteLength(message) > this.backpressureLimitBytes) {
+      this.logger.warn?.({ event }, 'QWD send rejected: backpressure')
+      return false
+    }
     if (
       !this.connected ||
       !this.socket ||
@@ -111,7 +128,20 @@ export class QwdClient {
       this.queue.push(message)
       return
     }
-    this.socket.send(message)
+    const socket = this.socket
+    try {
+      socket.send(message, error => {
+        if (error && this.socket === socket) {
+          this.logger.warn?.({ err: error, event }, 'QWD send failed')
+          socket.terminate()
+        }
+      })
+      return true
+    } catch (error) {
+      this.logger.warn?.({ err: error, event }, 'QWD send failed')
+      socket.terminate()
+      return false
+    }
   }
   publishTelemetry (players, seq = 0, framing = null) {
     const data = {
@@ -155,7 +185,11 @@ export class QwdClient {
       endpoint.pathname = '/'
       endpoint.searchParams.set('v', '1')
       if (this.nodeId) endpoint.searchParams.set('node', this.nodeId)
-      const socket = new WebSocket(endpoint, { handshakeTimeout: 10_000 })
+      const socket = this.socketFactory(endpoint, { handshakeTimeout: 10_000, maxPayload: 512 * 1024 })
+      const epoch = ++this.connectionEpoch
+      this.commandResults.clear()
+      this.queuedCommands = 0
+      this.commandChain = Promise.resolve()
       this.socket = socket
       socket.on('open', () => {
         if (this.socket !== socket) {
@@ -208,6 +242,7 @@ export class QwdClient {
         try {
           const command = JSON.parse(data.toString())
           if (!command?.cmd) return
+          if (command.v !== 1 || !Number.isSafeInteger(command.id) || command.id < 0) throw new Error('invalid QWD command envelope')
           if (command.cmd === 'room.id_conflict') {
             const previousRoomId = this.room.id
             this.room.id = createRoomId()
@@ -228,16 +263,32 @@ export class QwdClient {
             }
             return
           }
-          this.commandChain = this.commandChain
-            .then(() => Promise.resolve(this.onCommand?.(command)))
-            .then(result =>
-              this.sendAck(command.id, result?.code ?? 0, result?.data)
-            )
-            .catch(error =>
-              this.sendAck(command.id, ErrorCode.INTERNAL, {
-                message: error?.message ?? String(error)
-              })
-            )
+          if (this.queuedCommands >= QUEUE_LIMIT) {
+            this.sendAck(command.id, ErrorCode.INTERNAL, { message: 'command queue full' }, socket, epoch)
+            return
+          }
+          this.queuedCommands++
+          this.commandChain = this.commandChain.then(async () => {
+            if (this.socket !== socket || epoch !== this.connectionEpoch || !this.connected) return
+            const fingerprint = JSON.stringify(command)
+            let cached = this.commandResults.get(command.id)
+            if (cached && cached.fingerprint !== fingerprint) throw new Error('command id reused with different content')
+            if (!cached) {
+              let result
+              try { result = await this.onCommand?.(command) } catch (error) {
+                result = { code: ErrorCode.INTERNAL, data: { message: error?.message ?? String(error) } }
+              }
+              if (this.socket !== socket || epoch !== this.connectionEpoch) return
+              cached = { fingerprint, code: result?.code ?? 0, data: result?.data }
+              this.commandResults.set(command.id, cached)
+              while (this.commandResults.size > 512) this.commandResults.delete(this.commandResults.keys().next().value)
+            }
+            this.sendAck(command.id, cached.code, cached.data, socket, epoch)
+          }).catch(error => {
+            this.sendAck(command.id, ErrorCode.INTERNAL, { message: error.message }, socket, epoch)
+          }).finally(() => {
+            if (epoch === this.connectionEpoch) this.queuedCommands--
+          })
         } catch (error) {
           this.logger.warn?.({ err: error }, 'invalid qwd command')
         }
@@ -335,14 +386,21 @@ export class QwdClient {
   markAlive (now = Date.now()) {
     this.lastActivityAt = now
   }
-  sendAck (id, code, data) {
-    if (
-      !this.connected ||
-      !this.socket ||
-      this.socket.readyState !== WebSocket.OPEN ||
-      !id
-    )
-      return
-    this.socket.send(JSON.stringify({ v: 1, id, code, data }))
+  sendAck (id, code, data, socket = this.socket, epoch = this.connectionEpoch) {
+    if (!this.connected || !socket || this.socket !== socket || epoch !== this.connectionEpoch ||
+      socket.readyState !== WebSocket.OPEN || !id) return false
+    try {
+      const message = JSON.stringify({ v: 1, id, code, data })
+      if (socket.bufferedAmount + Buffer.byteLength(message) > this.backpressureLimitBytes) {
+        socket.terminate()
+        return false
+      }
+      socket.send(message, error => { if (error && this.socket === socket) socket.terminate() })
+      return true
+    } catch (error) {
+      this.logger.warn?.({ err: error, id }, 'QWD ACK failed')
+      socket.terminate()
+      return false
+    }
   }
 }

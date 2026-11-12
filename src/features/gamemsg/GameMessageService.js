@@ -7,6 +7,7 @@ import { SnapshotWriter } from '../../protocol/snapshot/SnapshotWriter.js';
 import { netRpcRouter } from '../../protocol/packets/shared/netRpc/index.js';
 import { decodeNetRpcHeader } from '../../protocol/packets/shared/netRpc/NetRpcCodec.js';
 import { rpcTap, toHexPreview } from '../rpc/RpcTap.js';
+import { decodeAudienceNetPrefix } from '../audience/decodeAudienceNetPrefix.js';
 
 const DECODE_WARN_INTERVAL_MS = 30_000;
 
@@ -21,12 +22,13 @@ function partialPlayerState(raw) {
 }
 
 export class GameMessageService {
-  constructor({ players, levels, broadcaster, logger, stateDecode = 'full', packetDebug }) {
+  constructor({ players, levels, broadcaster, logger, stateDecode = 'full', packetDebug, onAudienceState }) {
     this.players = players;
     this.levels = levels;
     this.broadcaster = broadcaster;
     this.logger = logger;
     this.packetDebug = packetDebug;
+    this.onAudienceState = onAudienceState;
     this.stateDecode = stateDecode === 'basic' ? 'basic' : 'full';
     this.latestAcks = new Map();
     this.decodeWarnAt = new Map();
@@ -219,12 +221,22 @@ export class GameMessageService {
         return;
       }
       source.playerDelta.rawState = decoded.data;
+      const confirmedLayout = source.lastStateLayout;
+      let parsed = false;
       try {
         source.playerDelta.decodedState = this.decodeState(source, decoded.data);
-        source.lastStateLayout = source.playerDelta.decodedState.layout;
+        if (source.playerDelta.decodedState.complete) source.lastStateLayout = source.playerDelta.decodedState.layout;
+        parsed = true;
       } catch (error) {
         source.playerDelta.decodedState = partialPlayerState(decoded.data);
         this.reportDecodeFailure(source.id, decoded, payload, error);
+      }
+      const audiencePrefix = decodeAudienceNetPrefix(decoded.data);
+      if ((parsed || audiencePrefix) && this.onAudienceState) {
+        try {
+          this.onAudienceState({ session, source, decodedState: source.playerDelta.decodedState, audiencePrefix,
+            confirmedLayout, snapshot: payload.snapshot, payload: payload.payload, generation: payload.levelChangeCount });
+        } catch (error) { this.logger.warn?.({ err: error, playerId: source.id }, 'audience state observer failed'); }
       }
       return;
     }

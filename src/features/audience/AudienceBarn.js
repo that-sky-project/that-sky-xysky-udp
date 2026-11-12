@@ -21,22 +21,6 @@ export const AUDIENCE_ENTITY_FLAG_OUTSIDE_ROOM = 0x0040
 export const AUDIENCE_ENTITY_FLAG_IN_ROOM = 0x1000
 export const AUDIENCE_ENTITY_FLAG_SPECIAL_TYPE = 0x2000
 export const AUDIENCE_ENTITY_FLAG_PRESENCE = 0x8000
-/**
- * Spotlight (concert stage) entity shape, from `sub_1417D6940`:
- * `type == 0xE` with `extraVal` in [2, 33] enables the spotlight render path
- * (`bit13 | 0x2000` at entity+108) on every client that receives the entity.
- */
-export const AUDIENCE_ENTITY_TYPE_SPOTLIGHT = 0x0e
-export const AUDIENCE_SPOTLIGHT_STAGE_MID = 17
-/** Segment-3 value that lands in [16, 31] — the `(v29 & 0x10)` branch. */
-export const AUDIENCE_SPOTLIGHT_EXTRA_FLAG = 16
-/**
- * Broadcast-stage state carried in reliable-data profile field f68 (2 bits,
- * read by `sub_1417D5E20` and compared `&3` in `sub_1417D6940`). Warm-up and
- * on-stage are the two states the manager hands down.
- */
-export const AUDIENCE_STAGE_WARM_UP = 1
-export const AUDIENCE_STAGE_ON_STAGE = 2
 export const AUDIENCE_HISTORY_SLOTS = 3
 export const AUDIENCE_HISTORY_MIN_SAMPLES = 2
 export const AUDIENCE_HISTORY_TOLERANCE_SECONDS = 3.0

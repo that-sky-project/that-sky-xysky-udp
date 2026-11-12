@@ -70,14 +70,13 @@ export function readAudienceActive (reader) {
   return reader.readBool()
 }
 export function writeAudienceEntity (writer, entity) {
-  // Second bit of the id-18 data block, sub_114A1C8 asm-verified:
-  // when true the client commits the full 0x235-byte render record for this
-  // entity this frame (sub_1130BF0 capture + memcpy) — full-bird rendering.
-  // Room membership does NOT travel here; the 0x1000/0x40 flags at entity
-  // +105 are set exclusively from the id-22 member list match.
-  const commitRecord = entity.commitRecord !== false && entity.hasData !== false
-  writer.writeBool(commitRecord)
-  if (!commitRecord) return
+  // IDA 0x114A410: dataPresent; if true, 0x114A424 reads resetEntity
+  // before flag7/type. Only resetEntity selects the memcpy reset path at
+  // 0x114A908/924. Membership is carried independently by packet 22.
+  const dataPresent = entity.dataPresent !== false
+  writer.writeBool(dataPresent)
+  if (!dataPresent) return
+  writer.writeBool(entity.resetEntity === true)
   writer.writeCompressed(entity.flag7 ?? 0, 7)
   const type = entity.type ?? 0
   writer.writeCompressed(type, 15)
@@ -86,9 +85,10 @@ export function writeAudienceEntity (writer, entity) {
   }
 }
 export function readAudienceEntity (reader) {
-  const commitRecord = reader.readBool()
-  const entity = { commitRecord }
-  if (!commitRecord) return entity
+  const dataPresent = reader.readBool()
+  const entity = { dataPresent }
+  if (!dataPresent) return entity
+  entity.resetEntity = reader.readBool()
   entity.flag7 = reader.readCompressed(7)
   entity.type = reader.readCompressed(15)
   if ((entity.type & 0xfe) === 0x0e) {

@@ -70,9 +70,10 @@ export class EnetServer extends EventEmitter {
 
   send(peerId, buffer, { channel = 0, reliable = true } = {}) {
     if (!this.server) {
-      return 0;
+      return -1;
     }
 
+    // Preserve sky-enet's contract: 0 means queued, a negative value failed.
     return this.server.send(peerId, channel, buffer, reliable);
   }
 

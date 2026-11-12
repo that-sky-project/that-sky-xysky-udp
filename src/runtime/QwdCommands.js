@@ -72,11 +72,8 @@ const audienceSnapshot = {
     const applied = server.audienceService.applyRemoteSnapshot(levelId, seats, {
       full
     })
-    const session = data.spotlightSession
-    server.audienceService.syncSpotlightState({
-      levelId,
-      performerId: session?.performerId ?? null
-    })
+    // Seating snapshots never establish performance authority. Only the
+    // versioned performance.state/decision/deliver commands may do that.
     return ok({ accepted: true, applied, removed: removed.length })
   }
 }
@@ -259,6 +256,29 @@ const moveCommit = {
 }
 export const QWD_COMMANDS = new Map(
   Object.entries({
+    'performance.state': { async handle (command, server) {
+      const authority = server.audienceService.performance
+      const applied = await authority.enqueue(() => authority.state(command.data))
+      const data = { authorityEpoch: command.data.authorityEpoch, revision: command.data.revision, applied }
+      return applied ? ok(data) : fail(ErrorCode.CONFLICT, 'stale performance state', data)
+    } },
+    'performance.decision': { async handle (command, server) {
+      const authority = server.audienceService.performance
+      await authority.enqueue(() => authority.decision(command.data)); return ok()
+    } },
+    'performance.deliver': { async handle (command, server) {
+      const authority = server.audienceService.performance
+      return ok(await authority.enqueue(() => authority.deliver(command.data)))
+    } },
+    'performance.gap': { async handle (command, server) {
+      const authority = server.audienceService.performance
+      const data = await authority.enqueue(() => authority.gap(command.data))
+      return data.applied ? ok(data) : fail(ErrorCode.CONFLICT, 'stale performance gap', data)
+    } },
+    'audience.reaction': { async handle (command, server) {
+      const reactions = server.audienceReactionService
+      return reactions.enqueue(() => reactions.apply(command.data))
+    } },
     'seat.assign': seatAssign,
     'audience.snapshot': audienceSnapshot,
     'seat.release': seatRelease,

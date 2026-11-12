@@ -2,11 +2,7 @@ import {
   AudienceBarn,
   AUDIENCE_MAX_ENTITY_INDEX,
   AUDIENCE_ENTITY_FLAG_IN_ROOM,
-  AUDIENCE_ENTITY_FLAGS_OUTSIDE_ROOM,
-  AUDIENCE_ENTITY_TYPE_SPOTLIGHT,
-  AUDIENCE_SPOTLIGHT_STAGE_MID,
-  AUDIENCE_SPOTLIGHT_EXTRA_FLAG,
-  AUDIENCE_STAGE_ON_STAGE
+  AUDIENCE_ENTITY_FLAGS_OUTSIDE_ROOM
 } from './AudienceBarn.js'
 import {
   AudiencePacketId,
@@ -26,7 +22,7 @@ export class AudienceService {
     barn,
     sendToClient,
     onPositionChanged,
-    onSpotlightChanged,
+    performance,
     currentLevelOf,
     logger = console,
     clock = () => Date.now(),
@@ -42,8 +38,10 @@ export class AudienceService {
     this.sendToClient = sendToClient
     this.packetDebug = packetDebug
     this.onPositionChanged = onPositionChanged
-    this.onSpotlightChanged = onSpotlightChanged
+    this.performance = performance
+    this.idleStreamInfo = defaultStreamInfo()
     this.spotlightPerformers = new Map()
+    this.performanceStates = new Map()
     this.currentLevelOf = currentLevelOf
     this.logger = logger
     this.clock = clock
@@ -132,7 +130,7 @@ export class AudienceService {
     if (typeof this.currentLevelOf !== 'function') return true
     const liveLevel = this.currentLevelOf(playerId)
     if (liveLevel === undefined || liveLevel === null) return false
-    return isAudienceLevel(liveLevel)
+    return liveLevel === roster.levelId && isAudienceLevel(liveLevel)
   }
   forgetPlayer (playerId) {
     this.barn.forgetPlayer(playerId)
@@ -177,15 +175,7 @@ export class AudienceService {
         playerId,
         position,
         levelTime,
-        flags: AUDIENCE_ENTITY_FLAGS_OUTSIDE_ROOM,
-        ...(seat.spotlight === true
-          ? {
-              type: AUDIENCE_ENTITY_TYPE_SPOTLIGHT,
-              extraVal: AUDIENCE_SPOTLIGHT_STAGE_MID,
-              extra: AUDIENCE_SPOTLIGHT_EXTRA_FLAG,
-              stageState: AUDIENCE_STAGE_ON_STAGE
-            }
-          : {})
+        flags: AUDIENCE_ENTITY_FLAGS_OUTSIDE_ROOM
       })
       this.barn.pushPosition(entityIdx, position, levelTime)
       applied += 1
@@ -211,18 +201,37 @@ export class AudienceService {
     }
   }
   async broadcastFrame (levelTime = 0, origin) {
+    if (this.frameInFlight) return { skipped: true, reason: 'in_flight' }
+    if (!Number.isFinite(levelTime) || (this.lastFrameStartedAt !== undefined && levelTime <= this.lastFrameStartedAt)) {
+      return { skipped: true, reason: 'non_increasing_time' }
+    }
+    this.frameInFlight = true
+    this.lastFrameStartedAt = levelTime
+    try { return await this.broadcastNormalFrame(levelTime, origin) } finally { this.frameInFlight = false }
+  }
+  async broadcastNormalFrame (levelTime, origin) {
     const resampled = this.barn.resampleAll(levelTime)
     const frameOrigin = origin ?? this.barn.suggestOrigin()
     let framesSent = 0
     let activeTotal = 0
-    let inRoomTotal = 0
+    let dataRecords = 0
     const windowStart = this.profileCursor
     this.profileCursor =
       (this.profileCursor + this.profileWindow) %
       (AUDIENCE_MAX_ENTITY_INDEX + 1)
-    for (const [playerId, roster] of this.rosters) {
-      if (!this.#isSeatedInVenue(playerId, roster)) continue
+    // Freeze every recipient's normal motion frames before the first await.
+    // Later seat snapshots/pulses cannot inject a different position/time into
+    // this frame transaction while profiles or transport sends are awaited.
+    const plans = [...this.rosters].filter(([playerId, roster]) => this.#isSeatedInVenue(playerId, roster)).map(([playerId, roster]) => {
       const roomIndices = this.#roomIndicesFor(playerId, roster)
+      const frames = this.barn.buildFrames({ memberIndices: roomIndices, levelTime, origin: [...frameOrigin],
+        byteBudget: this.byteBudget, reserveReactionData: true }).map(frame => ({ ...frame,
+        entities: frame.entities.map(entity => ({ ...entity, ...(entity.position ? { position: [...entity.position] } : {}) })) }))
+      return { playerId, roster, roomIndices, frames, pulses: this.reactions?.prepare(playerId, roster.levelId) ?? new Map() }
+    })
+    for (const { playerId, roster, roomIndices, frames, pulses } of plans) {
+      if (this.rosters.get(playerId) !== roster || !this.#isSeatedInVenue(playerId, roster)) continue
+      try {
       if (roster.pendingHandshake) {
         const entity = this.barn.getEntityForPlayer(playerId)
         if (!entity || !this.barn.latestPosition(entity.entityIdx, levelTime))
@@ -238,42 +247,58 @@ export class AudienceService {
         id: AudiencePacketId.AudienceStreamInfo,
         payload: this.#streamInfoFor(playerId)
       })
-      const onStageIds = new Set(
-        [...this.spotlightPerformers.values()].map(state => state.playerId)
-      )
       for (const chunk of this.barn.buildProfileChunks({
         memberIndices: roomIndices,
         limit: this.profileChunkSize,
         budget: this.profileWindow,
         rangeStart: windowStart,
-        rangeLength: this.profileWindow,
-        nowSeconds: levelTime,
-        onStagePlayerIds: onStageIds
+        rangeLength: this.profileWindow
       })) {
         await this.sendToClient(playerId, {
           id: AudiencePacketId.AudienceReliableData,
           payload: chunk
         })
       }
-      const frames = this.barn.buildFrames({
-        memberIndices: roomIndices,
-        levelTime,
-        origin: frameOrigin,
-        byteBudget: this.byteBudget
-      })
-      for (const frame of frames) {
-        await this.sendToClient(playerId, {
-          id: AudiencePacketId.Audience,
-          payload: frame
+      for (const baseline of frames) {
+        const transactions = []
+        const entities = baseline.entities.map((entity, offset) => {
+          const transaction = pulses.get(baseline.idxStart + offset)
+          if (!entity.active || !transaction || !this.reactions.usable(transaction) || entity.type === 14 || entity.type === 15) return entity
+          transactions.push(transaction)
+          return { ...entity, dataPresent: true, resetEntity: false,
+            flag7: transaction.entry.data.reaction.flag7, type: transaction.entry.data.reaction.type }
         })
+        for (const transaction of transactions) {
+          const profileBarn = Object.create(this.barn)
+          profileBarn.entities = new Map([[transaction.entity.entityIdx, transaction.entity]])
+          profileBarn.dirtyEntities = new Set([transaction.entity.entityIdx])
+          for (const chunk of profileBarn.buildProfileChunks({ limit: 1, budget: 1 })) {
+            const result = await this.sendToClient(playerId, { id: AudiencePacketId.AudienceReliableData, payload: chunk })
+            if (result === false || (typeof result === 'number' && result < 0)) throw new Error('reaction profile send rejected')
+          }
+        }
+        // A session may have ended or the TTL may have elapsed during profile
+        // output. Restore only the event fields; motion remains the frozen frame.
+        const committed = transactions.filter(transaction => this.reactions.usable(transaction))
+        const valid = new Set(committed)
+        for (let offset = 0; offset < entities.length; offset++) {
+          const transaction = pulses.get(baseline.idxStart + offset)
+          if (transaction && !valid.has(transaction)) entities[offset] = baseline.entities[offset]
+        }
+        const result = await this.sendToClient(playerId, { id: AudiencePacketId.Audience, payload: { ...baseline, entities } })
+        if (result === false || (typeof result === 'number' && result < 0)) throw new Error('audience frame send rejected')
+        this.reactions?.commit(committed)
       }
       framesSent += frames.length
       for (const frame of frames) {
         for (const entity of frame.entities) {
           if (!entity.active) continue
           activeTotal += 1
-          if (entity.commitRecord) inRoomTotal += 1
+          if (entity.dataPresent) dataRecords += 1
         }
+      }
+      } catch (error) {
+        this.logger.debug?.({ err: error, playerId }, 'normal audience frame recipient failed; pulse remains pending')
       }
     }
     this.stats.frames += framesSent
@@ -290,7 +315,7 @@ export class AudienceService {
           frames: framesSent,
           rosters: this.rosters.size,
           active: activeTotal,
-          inRoom: inRoomTotal,
+          dataRecords,
           barnEntities: this.barn.entities.size,
           resampled,
           origin: frameOrigin,
@@ -360,6 +385,8 @@ export class AudienceService {
   async handleRequest (session, payload) {
     const playerId = playerIdOf(session)
     if (!playerId || !this.rosters.has(playerId)) return
+    const roster = this.rosters.get(playerId)
+    if (!this.performance?.validSource(session, roster.levelId, payload?.levelChangeCount)) return
     const type = payload?.type
     const schema = audienceRequestPayloads.get(type)
     if (!schema) {
@@ -381,6 +408,7 @@ export class AudienceService {
       )
       return
     }
+    decoded.generation = payload.levelChangeCount
     switch (type) {
       case AudienceGameMsgType.Hint:
         return this.handleHint(session, decoded)
@@ -407,30 +435,10 @@ export class AudienceService {
   async handleSocialBroadcast (session, request) {
     const playerId = playerIdOf(session)
     const roster = this.rosters.get(playerId)
-    if (!roster) return
-    const payload = request?.payload
-    if (!payload || payload.length === 0) return
-    if (this.spotlightPerformers.get(roster.levelId)?.playerId !== playerId) {
-      this.stats.staleSocialDrops = (this.stats.staleSocialDrops ?? 0) + 1
-      return
-    }
-    await this.broadcastPerformance({
-      // The client binds the JSON action to the entity whose profile f0
-      // equals this id and drops the packet when it matches its own hash
-      // (sub_115BA7C). It must be the performer's identity hash — without it
-      // the broadcast renders nowhere (the previous code omitted sessionId,
-      // so every client received id=0 and matched no entity).
-      sessionId: identityHashOfPlayerId(playerId) ?? 0n,
-      time: request.timestamp,
-      counter: request.actionId,
-      json: payload,
-      levelId: roster.levelId
-    })
-    this.stats.socialRelays = (this.stats.socialRelays ?? 0) + 1
-    this.logger.debug?.(
-      { playerId, actionId: request?.actionId, bytes: payload.length },
-      'relayed social broadcast to the hall (packet 24)'
-    )
+    if (!roster || !this.performance) return false
+    const accepted = await this.performance.publishContent(session, request, request.generation)
+    if (accepted) this.stats.socialRelays = (this.stats.socialRelays ?? 0) + 1
+    return accepted
   }
   async broadcastPerformance ({
     sessionId,
@@ -439,7 +447,9 @@ export class AudienceService {
     counter,
     json,
     exceptPlayerId,
-    levelId
+    levelId,
+    submitted = new Set(),
+    recipientKey = playerId => playerId
   }) {
     const payload = {
       sessionId:
@@ -454,10 +464,19 @@ export class AudienceService {
       if (exceptPlayerId && playerId === exceptPlayerId) continue
       if (!this.#isSeatedInVenue(playerId, roster)) continue
       if (levelId !== undefined && roster.levelId !== levelId) continue
-      await this.sendToClient(playerId, {
+      const key = recipientKey(playerId)
+      if (submitted.has(key)) continue
+      const result = await this.sendToClient(playerId, {
         id: AudiencePacketId.SocialBroadcastDown,
         payload
       })
+      // sky-enet returns 0 when queued successfully and a negative code on
+      // failure. Boolean adapters may reject explicitly; void test callbacks
+      // retain their existing successful-completion contract.
+      if (result === false || (typeof result === 'number' && result < 0)) {
+        throw new Error('performance client send rejected')
+      }
+      submitted.add(key)
       sent += 1
     }
     if (sent > 0)
@@ -484,110 +503,111 @@ export class AudienceService {
       })
     }
   }
-  async handleSpotlightRequest (session, { requested }) {
+  async handleSpotlightRequest (session, { requested, generation }) {
     const playerId = playerIdOf(session)
-    if (!playerId) return
-    const granted = requested === true
-    await this.sendToClient(playerId, {
-      id: AudiencePacketId.AudienceSpotlightResponse,
-      payload: { accepted: granted, released: !granted }
-    })
-    const roster = this.rosters.get(playerId)
-    if (roster) {
-      this.syncSpotlightState({
-        levelId: roster.levelId,
-        performerId: granted ? playerId : null
-      })
-      if (this.onSpotlightChanged) {
-        this.onSpotlightChanged({
-          levelId: roster.levelId,
-          playerId,
-          active: granted
-        })
-      }
+    if (!playerId) return false
+    if (!this.performance) {
+      this.logger.warn?.({ playerId }, 'performance request rejected: QWD is not configured')
+      await this.sendSpotlightResponse(playerId, false, false)
+      return false
     }
     this.stats.spotlightRequests = (this.stats.spotlightRequests ?? 0) + 1
+    return this.performance.request(session, requested === true, generation)
   }
-  applySpotlightChange ({ levelId, playerId, active }) {
-    if (!isAudienceLevel(levelId)) return false
-    if (active) {
-      const existing = this.spotlightPerformers.get(levelId)
-      if (existing?.playerId !== playerId) {
-        this.spotlightPerformers.set(levelId, {
-          playerId,
-          startedAt: this.clock() / 1000
-        })
-      }
-    } else if (this.spotlightPerformers.get(levelId)?.playerId === playerId) {
-      this.spotlightPerformers.delete(levelId)
-    }
-    const changed = this.#setEntitySpotlight(playerId, active)
-    if (changed)
-      this.stats.spotlightChanges = (this.stats.spotlightChanges ?? 0) + 1
-    return true
-  }
-  syncSpotlightState ({ levelId, performerId }) {
-    if (!isAudienceLevel(levelId)) return false
-    const previous = this.spotlightPerformers.get(levelId)
-    if (!performerId) {
-      if (!previous) return false
-      this.#setEntitySpotlight(previous.playerId, false)
-      this.spotlightPerformers.delete(levelId)
-      this.stats.spotlightChanges = (this.stats.spotlightChanges ?? 0) + 1
-      return true
-    }
-    if (previous?.playerId === performerId) return false
-    if (previous) this.#setEntitySpotlight(previous.playerId, false)
-    this.spotlightPerformers.set(levelId, {
-      playerId: performerId,
-      startedAt: this.clock() / 1000
+  sendSpotlightResponse (playerId, accepted, released) {
+    return this.sendToClient(playerId, {
+      id: AudiencePacketId.AudienceSpotlightResponse,
+      payload: { valid: accepted || released, accepted, released }
     })
-    this.#setEntitySpotlight(performerId, true)
-    this.stats.spotlightChanges = (this.stats.spotlightChanges ?? 0) + 1
-    return true
   }
-  #setEntitySpotlight (playerId, active) {
-    const entity = this.barn.getEntityForPlayer(playerId)
-    if (!entity) return false
-    if (active) {
-      entity.type = AUDIENCE_ENTITY_TYPE_SPOTLIGHT
-      entity.extraVal = AUDIENCE_SPOTLIGHT_STAGE_MID
-      entity.extra = AUDIENCE_SPOTLIGHT_EXTRA_FLAG
-      entity.stageState = AUDIENCE_STAGE_ON_STAGE
-    } else {
-      entity.type = 0
-      entity.extraVal = 0
-      entity.extra = null
-      entity.stageState = 0
+  performanceIdentity (playerId) { return identityHashOfPlayerId(playerId) ?? 0n }
+  async clearBroadcast (levelId) {
+    for (const [playerId, roster] of this.rosters) {
+      if (roster.levelId !== levelId || !this.#isSeatedInVenue(playerId, roster)) continue
+      await this.#sendPerformancePacket(playerId, {
+        id: AudiencePacketId.AudienceChatDownReliable,
+        payload: { messages: [{ entityId: AudienceChatEntityId.ClearBroadcast, payload: Buffer.alloc(0) }] }
+      })
     }
-    this.barn.dirtyEntities.add(entity.entityIdx)
+  }
+  async clearPerformance (levelId) {
+    await this.applyPerformanceState(levelId, { current: null, preparing: null, queue: [] })
+  }
+  async applyPerformanceState (levelId, { current, preparing, queue }) {
+    const previous = this.performanceStates.get(levelId)
+    const oldPreparation = previous?.preparing
+    if (oldPreparation && oldPreparation.preparationId !== preparing?.preparationId &&
+      current?.performerId !== oldPreparation.performerId) {
+      // id29 acknowledges a request; it cannot release native preparing state2.
+      // Explicitly project no session/no queue for the previous preparer first,
+      // even when the next preparation names the same player at queue index 0.
+      // Reliable send order does not guarantee a render tick between these two
+      // StreamInfos; no stronger client-side observation guarantee is claimed.
+      const playerId = oldPreparation.performerId
+      const roster = this.rosters.get(playerId)
+      if (roster?.levelId === levelId && this.#isSeatedInVenue(playerId, roster)) {
+        await this.#sendPerformancePacket(playerId, { id: AudiencePacketId.AudienceStreamInfo,
+          payload: { ...this.idleStreamInfo, hasSession: false, hasStageEnd: true, stageEnd: 0xffff } })
+      }
+    }
+    if (previous?.current && previous.current.sessionId !== current?.sessionId) await this.clearBroadcast(levelId)
+    this.performanceStates.set(levelId, { current, preparing, queue })
+    if (current) this.spotlightPerformers.set(levelId, { ...current, playerId: current.performerId })
+    else this.spotlightPerformers.delete(levelId)
+    await this.sendPerformanceInfo(levelId)
+  }
+  async #sendPerformancePacket (playerId, packet) {
+    const result = await this.sendToClient(playerId, packet)
+    if (result === false || (typeof result === 'number' && result < 0)) throw new Error('performance client send rejected')
+  }
+  async sendPerformanceInfo (levelId) {
+    for (const [playerId, roster] of this.rosters) {
+      if (roster.levelId !== levelId || !this.#isSeatedInVenue(playerId, roster)) continue
+      await this.#sendPerformancePacket(playerId, { id: AudiencePacketId.AudienceStreamInfo, payload: this.#streamInfoFor(playerId) })
+    }
+  }
+  async preparePerformance (levelId, performerId) {
+    const entity = this.barn.getEntityForPlayer(performerId)
+    if (!entity || !entity.position || entity.hasData === false || !identityHashOfPlayerId(performerId)) return false
+    // Reliable identity profile precedes content; profile f68 and entity type14
+    // are not performance state. Never overwrite genuine incoming reactions.
+    for (const [playerId, roster] of this.rosters) {
+      if (roster.levelId !== levelId || !this.#isSeatedInVenue(playerId, roster)) continue
+      const profileBarn = Object.create(this.barn)
+      profileBarn.entities = new Map([[entity.entityIdx, entity]])
+      profileBarn.dirtyEntities = new Set([entity.entityIdx])
+      for (const chunk of profileBarn.buildProfileChunks({ memberIndices: this.#roomIndicesFor(playerId, roster),
+        limit: 1, budget: 1, rangeStart: entity.entityIdx, rangeLength: 1 })) {
+        await this.#sendPerformancePacket(playerId, { id: AudiencePacketId.AudienceReliableData, payload: chunk })
+      }
+    }
     return true
   }
   #entityOf (playerId) {
     return this.barn.getEntityForPlayer(playerId)?.entityIdx ?? 0
   }
   #streamInfoFor (playerId) {
-    const base = this.streamInfo ?? defaultStreamInfo()
+    const base = this.streamInfo ?? this.idleStreamInfo
     const roster = this.rosters.get(playerId)
-    const performer = roster
-      ? this.spotlightPerformers.get(roster.levelId)
-      : undefined
-    if (!performer) return base
-    return {
-      ...base,
-      hasSession: true,
-      sessionId: profileF0Of(performer.playerId),
-      // `stage` is a venue-state index, NOT elapsed seconds: both official
-      // captures carry free-running values (idle 44, active session 48) and
-      // sub_10FE178 never compares it against anything — only stageStart
-      // (!= 1) and stageEnd steer the state machine. The previous
-      // Math.min(30, elapsed) turned the index into a 0..30 ramp, an
-      // in-between venue state the level's performance markers do not
-      // define — the phantom-position path (players landing under the stage
-      // floor / in the water instead of the piano marker).
-      stage: 48,
-      startTime: performer.startedAt
+    const state = roster ? this.performanceStates.get(roster.levelId) : undefined
+    const { current, preparing, queue = [] } = state ?? {}
+    const queueIndex = current?.performerId === playerId ? -1 : queue.findIndex(entry => entry.playerId === playerId)
+    const info = { ...base, hasSession: false, sessionId: 0n,
+      hasStageEnd: queueIndex >= 0, stageEnd: queueIndex >= 0 ? queueIndex : 0xffff }
+    if (preparing) {
+      info.startTime = (this.performance?.preparationDeadline?.(roster.levelId) ??
+        (preparing.expiresAtMs - (this.performance?.offsets.get(roster.levelId) ?? 0))) / 1000
+      info.hasStartTime = true
+    } else if (current) {
+      info.hasSession = true
+      info.sessionId = profileF0Of(current.performerId)
+      // Retain the legacy captured value without assigning it stage semantics.
+      info.stage = 48
+      info.hasStartTime = true
+      info.startTime = (current.expiresAtMs - (this.performance?.offsets.get(roster.levelId) ?? 0) +
+        (current.performerId === playerId ? 5000 : 0)) / 1000
     }
+    return info
   }
   #localBenches () {
     const benches = new Set()
@@ -606,6 +626,7 @@ export class AudienceService {
       }
     }
     for (const [index, entity] of this.barn.entities) {
+      if (entity.levelId !== levelId) continue
       if (!entity.playerId) continue
       if (this.rosters.has(entity.playerId)) continue
       if (localBenches.has(entity.benchId)) continue
@@ -668,10 +689,9 @@ const POSITION_REPORT_EPSILON = 0.25
  * Idle stream shape, from the official-server capture (test golden wire
  * '8280fa00...'): startIdx=129/endIdx=500 are the last window the show
  * rendered (stored values — the wire is signed-bounded, wire = stored+1),
- * stage 44 + stageStart 90 tell the client the venue is open but no session
- * is running, and startTime anchors the stage clock on a 30 s grid so every
- * client agrees on the current stage phase. Values are from the capture; do
- * not invent new magic numbers without one.
+ * Captured stage 44 and stageStart 90 are retained; their exact semantics
+ * remain unknown. startTime is a deadline, not a session start. Idle uses a
+ * stable inactive value; active deadlines come only from QWD authority.
  */
 function defaultStreamInfo () {
   return {

@@ -9,4 +9,11 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
-test/
+# Keep existing local fixtures ignored; retain the authority regression suite.
+test/*
+!test/audience.test.js
+!test/audience-reaction.test.js
+!test/barnClock.test.js
+!test/capture.test.js
+!test/capture-golden.json
+!test/performance-authority.test.js

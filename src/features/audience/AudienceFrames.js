@@ -4,17 +4,37 @@ import {
   fnv1a64
 } from '../../protocol/identityHash.js'
 const FRAME_HEADER_BYTES = 4 + 8 + 12
+// Bits after the active bitmap and before the aligned u16 positions:
+// dataPresent + [resetEntity, flag7:3, type:4, optional extraVal:9]
+// followed (in a separate pass) by extraPresent + optional bounded extra:5.
+function entityVariableBits (entity) {
+  let bits = 1 + 1 + (entity.extra != null ? 5 : 0)
+  if (entity.dataPresent !== false) {
+    bits += 1 + 3 + 4
+    if (((entity.type ?? 0) & 0xfe) === 0x0e) bits += 9
+  }
+  return bits
+}
+function frameEntity (entity, member) {
+  const hasEvent = Boolean(entity.type || entity.flag7 || entity.extraVal || entity.extra != null || entity.resetEntity)
+  return {
+    dataPresent: member || hasEvent,
+    resetEntity: entity.resetEntity === true,
+    flag7: entity.flag7 ?? 0,
+    type: entity.type ?? 0,
+    extraVal: entity.extraVal ?? 0,
+    extra: entity.extra ?? undefined
+  }
+}
 export function estimateFrameBytes (frame) {
   let bits = frame.entities.length
   let positions = 0
   for (const entity of frame.entities) {
-    if (!entity.active) continue
-    bits += 1
-    if (entity.commitRecord !== false && entity.hasData !== false) {
-      bits += 1 + 3 + 4
-    }
+    if (entity.active === false) continue
+    bits += entityVariableBits(entity)
     positions += 6
   }
+  // Scalar reads/writes align once before the first position, not per bit field.
   return FRAME_HEADER_BYTES + Math.ceil(bits / 8) + positions
 }
 export function hashEntity (index, playerId) {
@@ -108,16 +128,9 @@ export function buildFrame (
     }
     entities.push({
       active: true,
-      // commitRecord: the client commits the full 0x235-byte render record
-      // this frame when true. Room-mates (id-22 members) render as full
-      // birds; every other silhouette renders from the position-only path.
-      // (Field was misnamed `inThisRoom` before the R2 rename — membership
-      // itself is decided client-side from the id-22 list, never on this bit.)
-      commitRecord: memberSet.has(index) && entity.hasData !== false,
-      flag7: entity.flag7 ?? 0,
-      type: entity.type ?? 0,
-      extraVal: entity.extraVal ?? 0,
-      extra: entity.extra ?? undefined,
+      // Local members always carry data without resetting each tick. Remote
+      // events also need the data block; membership does not control this bit.
+      ...frameEntity(entity, memberSet.has(index)),
       position
     })
   }
@@ -131,8 +144,10 @@ export function buildFrame (
 }
 export function buildFrames (
   barn,
-  { memberIndices, levelTime = 0, origin = [0, 0, 0], byteBudget = 630 } = {}
+  { memberIndices, levelTime = 0, origin = [0, 0, 0], byteBudget = 630, reserveReactionData = false } = {}
 ) {
+  const memberSet = new Set(memberIndices ?? [])
+  if (!Number.isFinite(byteBudget) || byteBudget < FRAME_HEADER_BYTES) throw new RangeError('audience byte budget is too small')
   const visible = new Set()
   for (const [index] of barn.entities) {
     if (barn.latestPosition(index, levelTime)) visible.add(index)
@@ -155,18 +170,20 @@ export function buildFrames (
       if (visible.has(index)) {
         visibleCount += 1
         const entity = barn.entities.get(index)
-        variableBits += 1
-        if (entity?.hasData !== false) {
-          variableBits += 1 + 7 + 4
-          if (((entity?.type ?? 0) & 0xfe) === 0x0e) variableBits += 9
-        }
+        const record = frameEntity(entity, memberSet.has(index))
+        // Stable normal pagination reserves the optional reaction block even
+        // when there is no pending pulse. Arrival cannot change position pages.
+        variableBits += entityVariableBits(reserveReactionData ? { ...record, dataPresent: true } : record)
       }
       const slots = index - startIdx + 1
       const estimate =
         FRAME_HEADER_BYTES +
         Math.ceil((slots + variableBits) / 8) +
         visibleCount * 6
-      if (j > first && estimate > byteBudget) break
+      if (estimate > byteBudget) {
+        if (j === first) throw new RangeError('audience byte budget cannot fit one entity')
+        break
+      }
       best = { end: index, j }
     }
     if (!best) break
@@ -183,19 +200,10 @@ export function buildFrames (
   }
   return frames
 }
-const BEHAVIOR_GESTURES = [1, 2, 3, 4, 5, 6, 7, 8]
-const QUEUE_WAVE_SPAN = 110
-const QUEUE_WAVE_SECONDS = 6
-export function behaviorOf (index, playerId, nowSeconds, onStage) {
-  if (onStage) return { f62: 3, f68: 2 }
-  const seed = hashEntity(index, playerId)
-  const slot = Math.floor(nowSeconds / 4) + (seed.u32 % 7)
-  const f62 = BEHAVIOR_GESTURES[slot % BEHAVIOR_GESTURES.length]
-  const wave =
-    Math.floor(index / QUEUE_WAVE_SPAN) +
-    Math.floor(nowSeconds / QUEUE_WAVE_SECONDS)
-  const warm = (wave + seed.v) % 5 === 0
-  return { f62, f68: warm ? 1 : 0 }
+export function behaviorOf () {
+  // Persistent profiles do not encode show phase or invented audience clicks.
+  // Actual reactions are short-lived id18 pulses from AudienceReactionService.
+  return { f62: 0, f68: 0 }
 }
 export function buildProfileChunks (
   barn,
@@ -203,9 +211,7 @@ export function buildProfileChunks (
     limit = 25,
     budget,
     rangeStart,
-    rangeLength,
-    nowSeconds = 0,
-    onStagePlayerIds
+    rangeLength
   } = {}
 ) {
   const entries = []
@@ -213,15 +219,9 @@ export function buildProfileChunks (
   const windowed = Number.isInteger(rangeStart) && Number.isInteger(rangeLength)
   const span = AUDIENCE_MAX_ENTITY_INDEX + 1
   const picked = new Set()
-  const stage = onStagePlayerIds ?? new Set()
   const build = (index, entity) => {
     const seed = hashEntity(index, entity.playerId)
-    const behavior = behaviorOf(
-      index,
-      entity.playerId,
-      nowSeconds,
-      stage.has(entity.playerId)
-    )
+    const behavior = behaviorOf()
     // f0 is ONLY the client-matching identity hash. When the player id isn't
     // a uuid (shouldn't happen in production) leave f0 unset — the client's
     // LCG(entityIdx) path renders a deterministic random bird instead of

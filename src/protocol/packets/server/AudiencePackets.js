@@ -354,8 +354,9 @@ export class AudienceSpotlightResponsePacket {
     return { valid, value, accepted: valid && value, released: valid && !value }
   }
   static encode (writer, packet) {
-    writer.writeBool(true)
-    writer.writeBool(packet.accepted === true)
+    const valid = packet.valid === true || packet.accepted === true || packet.released === true
+    writer.writeBool(valid)
+    writer.writeBool(valid && packet.accepted === true)
   }
 }
 export class AudienceFeatureFlagsPacket {
