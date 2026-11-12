@@ -256,6 +256,14 @@ const moveCommit = {
 }
 export const QWD_COMMANDS = new Map(
   Object.entries({
+    'liveBroadcast.capability': { async handle (command, server) {
+      const live = server.liveBroadcastService
+      return live.enqueue(() => live.capability(command.data))
+    } },
+    'liveBroadcast.deliver': { async handle (command, server) {
+      const live = server.liveBroadcastService
+      return live.enqueue(() => live.deliver(command.data))
+    } },
     'performance.state': { async handle (command, server) {
       const authority = server.audienceService.performance
       const applied = await authority.enqueue(() => authority.state(command.data))

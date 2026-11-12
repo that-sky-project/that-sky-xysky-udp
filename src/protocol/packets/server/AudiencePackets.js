@@ -134,12 +134,13 @@ export class SocialBroadcastDownPacket {
   static name = 'SocialBroadcastDownPacket'
   static decode (reader) {
     const sessionId = reader.readUInt64()
-    const flags = reader.readUInt32()
+    const prefix = readLengthPrefixedBytes(reader)
     const time = reader.readDouble()
     const counter = reader.readUInt32()
     const length = reader.readUInt32()
-    const json = reader.readBytes(Math.min(length, reader.remaining))
-    return { sessionId, flags, time, counter, length, json }
+    const json = reader.readBytes(length)
+    if (reader.remaining !== 0) throw new RangeError('unexpected SocialBroadcastDown trailing bytes')
+    return { sessionId, prefix, time, counter, length, json }
   }
   static encode (writer, packet) {
     if (Buffer.isBuffer(packet.raw) || packet.raw instanceof Uint8Array) {
@@ -149,11 +150,15 @@ export class SocialBroadcastDownPacket {
     const json = Buffer.isBuffer(packet.json)
       ? packet.json
       : Buffer.from(String(packet.json ?? ''), 'utf8')
+    if (packet.flags !== undefined && packet.flags !== 0) throw new RangeError('SocialBroadcastDown flags are not a wire field')
+    if (packet.length !== undefined && packet.length !== json.length) throw new RangeError('SocialBroadcastDown JSON length mismatch')
+    const prefix = packet.prefix ?? Buffer.alloc(0)
+    if (!Buffer.isBuffer(prefix) && !(prefix instanceof Uint8Array)) throw new TypeError('SocialBroadcastDown prefix must be bytes')
     writer.writeUInt64(packet.sessionId ?? 0n)
-    writer.writeUInt32(packet.flags ?? 0)
+    writeLengthPrefixedBytes(writer, prefix)
     writer.writeDouble(packet.time ?? 0)
     writer.writeUInt32(packet.counter ?? 0)
-    writer.writeUInt32(packet.length ?? json.length)
+    writer.writeUInt32(json.length)
     writer.writeBytes(json)
   }
 }

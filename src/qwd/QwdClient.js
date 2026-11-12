@@ -69,7 +69,7 @@ export class QwdClient {
   }
   publish (event, data) {
     const message = JSON.stringify({ v: 1, event, data })
-    const performance = event.startsWith('performance.') || event === 'audience.reaction'
+    const performance = event.startsWith('performance.') || event.startsWith('liveBroadcast.') || event === 'audience.reaction'
     if (performance && (!this.connected || this.socket?.readyState !== WebSocket.OPEN)) {
       this.logger.warn?.({ event }, 'QWD control send rejected: offline')
       return false

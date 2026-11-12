@@ -133,6 +133,8 @@ export class AudienceService {
     return liveLevel === roster.levelId && isAudienceLevel(liveLevel)
   }
   forgetPlayer (playerId) {
+    const session = this.liveBroadcastService?.sessionOf(playerId)
+    if (session) this.liveBroadcastService.uploads.delete(session)
     this.barn.forgetPlayer(playerId)
     this.rosters.delete(playerId)
   }
@@ -436,25 +438,29 @@ export class AudienceService {
     const playerId = playerIdOf(session)
     const roster = this.rosters.get(playerId)
     if (!roster || !this.performance) return false
-    const accepted = await this.performance.publishContent(session, request, request.generation)
+    const formal = this.performance.current(roster.levelId)?.performerId === playerId
+    if (formal) this.liveBroadcastService?.uploads.delete(session)
+    const publisher = formal ? this.performance : this.liveBroadcastService
+    const accepted = await publisher?.publishContent(session, request, request.generation) ?? false
     if (accepted) this.stats.socialRelays = (this.stats.socialRelays ?? 0) + 1
     return accepted
   }
   async broadcastPerformance ({
     sessionId,
-    flags = 0,
+    prefix = Buffer.alloc(0),
     time,
     counter,
     json,
     exceptPlayerId,
     levelId,
     submitted = new Set(),
-    recipientKey = playerId => playerId
+    recipientKey = playerId => playerId,
+    recipientValid = () => true
   }) {
     const payload = {
       sessionId:
         typeof sessionId === 'bigint' ? sessionId : BigInt(sessionId ?? 0),
-      flags,
+      prefix,
       time: time ?? this.clock(),
       counter: counter ?? 0,
       json
@@ -465,7 +471,7 @@ export class AudienceService {
       if (!this.#isSeatedInVenue(playerId, roster)) continue
       if (levelId !== undefined && roster.levelId !== levelId) continue
       const key = recipientKey(playerId)
-      if (submitted.has(key)) continue
+      if (submitted.has(key) || !recipientValid(playerId)) continue
       const result = await this.sendToClient(playerId, {
         id: AudiencePacketId.SocialBroadcastDown,
         payload
@@ -547,10 +553,14 @@ export class AudienceService {
       const roster = this.rosters.get(playerId)
       if (roster?.levelId === levelId && this.#isSeatedInVenue(playerId, roster)) {
         await this.#sendPerformancePacket(playerId, { id: AudiencePacketId.AudienceStreamInfo,
-          payload: { ...this.idleStreamInfo, hasSession: false, hasStageEnd: true, stageEnd: 0xffff } })
+          payload: { ...this.idleStreamInfo, flags: this.#streamFlagsFor(playerId, this.idleStreamInfo), hasSession: false, hasStageEnd: true, stageEnd: 0xffff } })
       }
     }
     if (previous?.current && previous.current.sessionId !== current?.sessionId) await this.clearBroadcast(levelId)
+    if (current) {
+      const session = this.liveBroadcastService?.sessionOf(current.performerId)
+      if (session) this.liveBroadcastService.uploads.delete(session)
+    }
     this.performanceStates.set(levelId, { current, preparing, queue })
     if (current) this.spotlightPerformers.set(levelId, { ...current, playerId: current.performerId })
     else this.spotlightPerformers.delete(levelId)
@@ -566,13 +576,14 @@ export class AudienceService {
       await this.#sendPerformancePacket(playerId, { id: AudiencePacketId.AudienceStreamInfo, payload: this.#streamInfoFor(playerId) })
     }
   }
-  async preparePerformance (levelId, performerId) {
+  async preparePerformance (levelId, performerId, { recipientValid = () => true } = {}) {
     const entity = this.barn.getEntityForPlayer(performerId)
     if (!entity || !entity.position || entity.hasData === false || !identityHashOfPlayerId(performerId)) return false
     // Reliable identity profile precedes content; profile f68 and entity type14
     // are not performance state. Never overwrite genuine incoming reactions.
     for (const [playerId, roster] of this.rosters) {
       if (roster.levelId !== levelId || !this.#isSeatedInVenue(playerId, roster)) continue
+      if (!recipientValid(playerId)) continue
       const profileBarn = Object.create(this.barn)
       profileBarn.entities = new Map([[entity.entityIdx, entity]])
       profileBarn.dirtyEntities = new Set([entity.entityIdx])
@@ -586,13 +597,19 @@ export class AudienceService {
   #entityOf (playerId) {
     return this.barn.getEntityForPlayer(playerId)?.entityIdx ?? 0
   }
+  #streamFlagsFor (playerId, base) {
+    const flags = [...(base.flags ?? [false, false, false, false, false])]
+    flags[2] = this.liveBroadcastService?.canPublish(playerId, this.rosters.get(playerId)?.levelId) === true
+    flags[4] = false
+    return flags
+  }
   #streamInfoFor (playerId) {
     const base = this.streamInfo ?? this.idleStreamInfo
     const roster = this.rosters.get(playerId)
     const state = roster ? this.performanceStates.get(roster.levelId) : undefined
     const { current, preparing, queue = [] } = state ?? {}
     const queueIndex = current?.performerId === playerId ? -1 : queue.findIndex(entry => entry.playerId === playerId)
-    const info = { ...base, hasSession: false, sessionId: 0n,
+    const info = { ...base, flags: this.#streamFlagsFor(playerId, base), hasSession: false, sessionId: 0n,
       hasStageEnd: queueIndex >= 0, stageEnd: queueIndex >= 0 ? queueIndex : 0xffff }
     if (preparing) {
       info.startTime = (this.performance?.preparationDeadline?.(roster.levelId) ??

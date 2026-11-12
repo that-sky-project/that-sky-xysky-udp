@@ -15,6 +15,7 @@ import { MoveService } from '../features/move/MoveService.js'
 import { AudienceService } from '../features/audience/AudienceService.js'
 import { PerformanceAuthority } from '../features/audience/PerformanceAuthority.js'
 import { AudienceReactionService } from '../features/audience/AudienceReactionService.js'
+import { IndependentLiveBroadcastService } from '../features/audience/LiveBroadcastService.js'
 import { AudienceCodec } from '../protocol/AudienceCodec.js'
 import { QwdClient } from '../qwd/QwdClient.js'
 import { ErrorCode, fail, ok } from '../qwd/errorCodes.js'
@@ -57,6 +58,7 @@ export class RoomServer {
       }),
       onTransportDropped: () => {
         this.audienceReactionService?.disconnected()
+        this.liveBroadcastService?.disconnected().catch(error => this.logger.warn?.({ err: error }, 'live broadcast disconnect cleanup failed'))
         this.audienceService?.performance?.disconnected().catch(error => this.logger.warn?.({ err: error }, 'performance disconnect cleanup failed'))
         const deadline = Date.now() + 15000
         for (const reservation of this.qwdReservations.values()) {
@@ -198,6 +200,14 @@ export class RoomServer {
       levels: () => this.players.listActive().map(player => player.levelId),
       logger
     })
+    this.liveBroadcastService = new IndependentLiveBroadcastService({
+      audience: this.audienceService,
+      publish: (event, data) => this.qwd.publish(event, data),
+      roomId: () => this.config.id,
+      sessionOf: playerId => this._sessionForPlayer(playerId),
+      levels: () => this.players.listActive().map(player => player.levelId),
+      logger
+    })
     this.audienceReactionService = new AudienceReactionService({
       audience: this.audienceService,
       publish: (event, data) => this.qwd.publish(event, data),
@@ -321,6 +331,7 @@ export class RoomServer {
     this.lastQwdTelemetryAt = 0
     this.publishQwdTelemetry()
     this.audienceService.performance.connected()
+    this.liveBroadcastService.connected()
   }
   _handleAuthorityElected (levelId, authority, targetPlayer) {
     if (this.authorityElectionGate.isSuppressed(levelId)) {
@@ -350,6 +361,7 @@ export class RoomServer {
     if (!this.performanceTick) {
       const authority = this.audienceService.performance
       this.performanceTick = authority.enqueue(() => authority.tick())
+        .then(() => this.liveBroadcastService.enqueue(() => this.liveBroadcastService.tick()))
         .catch(error => this.logger.warn?.({ err: error }, 'performance tick failed'))
         .finally(() => { this.performanceTick = null })
     }
