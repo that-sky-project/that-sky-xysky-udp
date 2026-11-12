@@ -382,6 +382,34 @@ export class GameMessageService {
         reason: payload.reason,
         updatedAt: Date.now()
       };
+      // The official server relays election nominees to the rest of the
+      // level (capture: 322 C→S up, 74 S→C down in packetdump_20261030203945
+      // — selective, same [levelId u32][reason u16] wire, source slot
+      // rewritten to the nominee). Peers use it to learn who is running for
+      // authority before the Elect lands.
+      const nomineeBytes = Buffer.alloc(6);
+      nomineeBytes.writeUInt32LE(payload.levelId, 0);
+      nomineeBytes.writeUInt16LE(payload.reason ?? 0, 4);
+      let relayed = 0;
+      for (const peer of this.activeInLevel(source.levelId)) {
+        if (peer === source) continue;
+        this.broadcaster.send(peer.session, {
+          id: PacketIds.GameMsg,
+          payload: {
+            type: GameMsgType.NetLevelElectionNominee,
+            levelChangeCount: peer.lvSeq,
+            sourcePlayer: source.id,
+            payloadBytes: nomineeBytes
+          }
+        });
+        relayed += 1;
+      }
+      if (relayed > 0) {
+        this.logger.debug?.(
+          { playerId: source.id, levelId: source.levelId, relayed },
+          'relayed election nominee to the level'
+        );
+      }
       return;
     }
 
@@ -589,6 +617,27 @@ export class GameMessageService {
     const activePlayers = this.activePlayers();
     if (activePlayers.length < 2) {
       return;
+    }
+
+    // A session whose outgoing snapshot window collapsed (resyncfailed twice)
+    // gets the id-5 SnapshotResync command: the client resets both channels
+    // and demands a keyframe (asm-verified: sub_1A99E98 id-5 branch re-inits
+    // both Writer/Reader pairs and writes the 0x0101 keyframe-needed flags).
+    // The next write after the client's reset is a raw keyframe by
+    // construction, so clear the flag right after sending.
+    for (const peer of activePlayers) {
+      for (const channel of [peer.playerDelta, peer.levelDelta]) {
+        if (!channel.resyncRequired) continue;
+        channel.resyncRequired = false;
+        this.broadcaster.send(peer.session, {
+          id: PacketIds.SnapshotResync,
+          payload: {}
+        });
+        this.logger.debug?.(
+          { playerId: peer.id, levelId: peer.levelId },
+          'snapshot window unrecoverable; sent resync command'
+        );
+      }
     }
 
     const entries = [];

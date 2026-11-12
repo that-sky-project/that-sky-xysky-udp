@@ -1,5 +1,6 @@
 export const PacketIds = Object.freeze({
   ClientConnect: 0,
+  SnapshotResync: 5,
   Disconnect: 1,
   Kick: 2,
   JoinGame: 3,

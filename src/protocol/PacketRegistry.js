@@ -2,6 +2,7 @@ import {
   JoinGamePacket,
   EnterGamePacket,
   PlayerChangeLevelPacket,
+  SnapshotResyncPacket,
   CancelMovePacket,
   DisconnectPacket,
   GameMsgPacket,
@@ -33,5 +34,6 @@ export function registerPacket(packetType) {
   MoveResultPacket,
   NetTimePingPacket,
   NetTimePongPacket,
-  PlayerLeftPacket
+  PlayerLeftPacket,
+  SnapshotResyncPacket
 ].forEach(registerPacket);

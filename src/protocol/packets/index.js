@@ -4,6 +4,7 @@ export { JoinGamePacket } from './client/JoinGamePacket.js';
 // S→C (server sends, client receives — encode only)
 export { EnterGamePacket } from './server/EnterGamePacket.js';
 export { PlayerChangeLevelPacket } from './server/PlayerChangeLevelPacket.js';
+export { SnapshotResyncPacket } from './server/SnapshotResyncPacket.js';
 
 // Bidirectional (both encode and decode)
 export { CancelMovePacket } from './shared/CancelMovePacket.js';
