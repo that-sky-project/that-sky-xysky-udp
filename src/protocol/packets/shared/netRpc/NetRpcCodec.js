@@ -1,70 +1,82 @@
-// NetRpc wire format — captured byte-exact from the official server
-// (packetdump_20261030203945 + 20260913131425, GameMsg type 2).
+// NetRpc wire format — reconciled from THREE evidence sources:
 //
-// rpcData is a CONCATENATION of records, each:
+// 1. Production live capture (2026-11-12): client rpcData chains perfectly as
+//    [classHash u32 LE][flags u8][bodyLen u16 LE][body] with NO slot byte —
+//    e.g. the 12-byte packet be6718d7 00 0500 9c6d18af02 (hash 0xd71867be,
+//    len 5, consumes exactly) and the 880-byte 110-record chat stream.
+// 2. Official-server dump (packetdump_20260913131425): gift/chat records show
+//    ONE extra byte before the class hash (1d/1f/83 = source player id the
+//    relayed record carries). Same bytes parse as slot-prefixed records that
+//    also consume exactly.
+// 3. Client asm sub_1A692A8: key = u32 + u8 + bounded-u16 — the hash/flags/
+//    len triple, with the id field coming from the GameMsg envelope.
 //
-//   [0]      slot        u8    associated player slot (sender on C->S)
-//   [1..4]   classHash   u32   LE — MetaClass hash (gift = 0x20d9b9b3,
-//                    bytes b3 b9 d9 20)
-//   [5]      flags       u8    per-class flag (gift wire shows 0x00)
-//   [6..7]   bodyLen     u16   LE, bounded <= 0x1000 (client reader
-//                    sub_1A692A8: u32 + u8 + bounded(0, 0x1000))
-//   [8..]    body        bodyLen bytes, format defined by the class
-//
-// Records repeat until the buffer ends. The previous implementation assumed
-// a flat [class_id u8×7][sender][receiver][type_flag] header — no capture
-// packet matches that shape, so the gift patch never fired on real traffic.
-//
-// The GameMsg envelope ([type u8][levelChangeCount u8][sourcePlayer u8]) is
-// stripped before rpcData reaches this layer.
+// Reconciliation: the stream is a chain of records; SOME streams (relayed /
+// certain classes) prefix records with a 1-byte source-player id. Rather than
+// guessing, the parser is SELF-SYNCING: it tries the no-slot chain first and
+// accepts it when the chain consumes the buffer exactly; otherwise it retries
+// with a slot byte per record; otherwise it gives up and the caller passes
+// the payload through untouched. Gift matching runs on whichever records
+// were recovered — the class hash identifies the gift record wherever it is.
 
 export const RECORD_HEADER_LENGTH = 8 // slot(1) + classHash(4) + flags(1) + bodyLen(2)
+export const RECORD_HEADER_LENGTH_NO_SLOT = 7 // classHash(4) + flags(1) + bodyLen(2)
 export const RECORD_MAX_BODY = 0x1000
 
-/**
- * Parse rpcData into its records. Malformed trailing bytes are returned as
- * `trailing` so callers can pass them through untouched — the wire must be
- * preserved byte-exactly for classes we do not handle.
- */
-export function decodeNetRpcRecords (rpcData) {
-  if (!Buffer.isBuffer(rpcData)) return null
+function chainParse (rpcData, slotWidth) {
   const records = []
   let offset = 0
-  while (offset + RECORD_HEADER_LENGTH <= rpcData.length) {
-    const slot = rpcData[offset]
-    const classHash = rpcData.readUInt32LE(offset + 1)
-    const flags = rpcData[offset + 5]
-    const bodyLen = rpcData.readUInt16LE(offset + 6)
-    if (bodyLen > RECORD_MAX_BODY) return { records, trailing: rpcData.subarray(offset) }
-    const bodyStart = offset + RECORD_HEADER_LENGTH
-    if (bodyStart + bodyLen > rpcData.length) {
-      return { records, trailing: rpcData.subarray(offset) }
+  const headerLen = slotWidth === 1 ? RECORD_HEADER_LENGTH : RECORD_HEADER_LENGTH_NO_SLOT
+  while (offset + headerLen <= rpcData.length) {
+    let cursor = offset
+    let slot = null
+    if (slotWidth === 1) {
+      slot = rpcData[cursor]
+      cursor += 1
     }
+    const classHash = rpcData.readUInt32LE(cursor)
+    const flags = rpcData[cursor + 4]
+    const bodyLen = rpcData.readUInt16LE(cursor + 5)
+    if (bodyLen > RECORD_MAX_BODY) return null
+    const bodyStart = cursor + 7
+    if (bodyStart + bodyLen > rpcData.length) return null
     records.push({
       slot,
       classHash,
       flags,
       bodyLen,
       body: rpcData.subarray(bodyStart, bodyStart + bodyLen),
-      // absolute offsets into the original buffer, so a patched body can be
-      // spliced back without re-serialising anything else
       recordStart: offset,
       bodyStart
     })
     offset = bodyStart + bodyLen
   }
-  return { records, trailing: offset < rpcData.length ? rpcData.subarray(offset) : null }
+  if (offset !== rpcData.length) return null // must consume exactly
+  return records
+}
+
+/**
+ * Parse rpcData into records, self-syncing the framing:
+ * 1. no-slot chain ([hash][flags][len][body] per record) — live client format
+ * 2. slot chain ([slot][hash][flags][len][body]) — official relayed format
+ * Returns { records, framing } or null when neither consumes exactly.
+ */
+export function decodeNetRpcRecords (rpcData) {
+  if (!Buffer.isBuffer(rpcData)) return null
+  if (rpcData.length === 0) return { records: [], framing: 'empty' }
+  const noSlot = chainParse(rpcData, 0)
+  if (noSlot) return { records: noSlot, framing: 'no-slot' }
+  const withSlot = chainParse(rpcData, 1)
+  if (withSlot) return { records: withSlot, framing: 'slot' }
+  return null
 }
 
 /** The 32-bit LE class hash of the gift MetaClass (bytes b3 b9 d9 20). */
 export const GIFT_CLASS_HASH = 0x20d9b9b3
 
-export { GIFT_CLASS_HASH as classIdKey }
-
 /**
  * First-record summary for logging (RpcTap). Returns the leading record's
  * routing fields, or null when the buffer doesn't parse as records.
- * `sender`/`receiver` legacy fields map to slot/flags for log continuity.
  */
 export function decodeNetRpcHeader (rpcData) {
   const parsed = decodeNetRpcRecords(rpcData)
@@ -76,6 +88,7 @@ export function decodeNetRpcHeader (rpcData) {
     receiver: first.flags,
     typeFlag: first.flags,
     bodyLen: first.bodyLen,
-    recordCount: parsed.records.length
+    recordCount: parsed.records.length,
+    framing: parsed.framing
   }
 }
