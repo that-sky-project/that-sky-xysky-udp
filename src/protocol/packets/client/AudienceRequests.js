@@ -63,8 +63,8 @@ export const AudienceChatRequest = {
     const messages = [];
     while (reader.remaining > 0) {
       messages.push({
-        sender: readLengthPrefixedBytes(reader),
-        message: readLengthPrefixedBytes(reader)
+        text: readLengthPrefixedBytes(reader),
+        signature: readLengthPrefixedBytes(reader)
       });
     }
     return { messages };
@@ -72,8 +72,8 @@ export const AudienceChatRequest = {
 
   encode(writer, packet) {
     for (const message of packet.messages ?? []) {
-      writeLengthPrefixedBytes(writer, message.sender ?? Buffer.alloc(0));
-      writeLengthPrefixedBytes(writer, message.message ?? Buffer.alloc(0));
+      writeLengthPrefixedBytes(writer, message.text ?? Buffer.alloc(0));
+      writeLengthPrefixedBytes(writer, message.signature ?? Buffer.alloc(0));
     }
   }
 };

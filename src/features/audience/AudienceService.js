@@ -123,6 +123,7 @@ export class AudienceService {
     })
     await this.#sendFeatureFlags(playerId)
     if (hasPosition) await this.#sendRoomIds(playerId, memberIndices)
+    await this.chatGlobalService?.sendToPlayerOnSeat(playerId, levelId)
     return { entityIdx, memberIndices }
   }
   #isSeatedInVenue (playerId, roster) {
@@ -498,13 +499,45 @@ export class AudienceService {
     }
     this.stats.consensusVotes = (this.stats.consensusVotes ?? 0) + 1
   }
+  async sendChatGlobalState (levelId, state, { playerId: onlyPlayerId } = {}) {
+    const enabled = state?.enabled === true
+    const packet = {
+      id: AudiencePacketId.AudienceChatDownReliable,
+      payload: {
+        messages: [{
+          entityId: enabled
+            ? AudienceChatEntityId.SetFloatParam
+            : AudienceChatEntityId.ClearBroadcast,
+          payload: enabled
+            ? Buffer.from(String(state.remainingSeconds))
+            : Buffer.alloc(0)
+        }]
+      }
+    }
+    let sent = 0
+    let firstError
+    for (const [playerId, roster] of this.rosters) {
+      if (onlyPlayerId !== undefined && playerId !== onlyPlayerId) continue
+      if (roster.levelId !== levelId || !this.#isSeatedInVenue(playerId, roster)) continue
+      try {
+        const result = await this.sendToClient(playerId, packet)
+        if (result === false || (typeof result === 'number' && result < 0)) {
+          throw new Error('global chat client send rejected')
+        }
+        sent += 1
+      } catch (error) {
+        firstError ??= error
+      }
+    }
+    if (firstError) throw firstError
+    return sent
+  }
   async handleChat (session, { messages = [] }) {
     const entityId = this.#entityOf(playerIdOf(session))
     for (const message of messages) {
       await this.broadcastChat({
         entityId,
-        payload: message.message,
-        sender: message.sender,
+        payload: message.text,
         reliable: true
       })
     }

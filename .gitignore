@@ -17,3 +17,4 @@ test/*
 !test/capture.test.js
 !test/capture-golden.json
 !test/performance-authority.test.js
+!test/global-chat-control.test.js

@@ -15,6 +15,7 @@ import { MoveService } from '../features/move/MoveService.js'
 import { AudienceService } from '../features/audience/AudienceService.js'
 import { PerformanceAuthority } from '../features/audience/PerformanceAuthority.js'
 import { AudienceReactionService } from '../features/audience/AudienceReactionService.js'
+import { AudienceChatGlobalService } from '../features/audience/AudienceChatGlobalService.js'
 import { IndependentLiveBroadcastService } from '../features/audience/LiveBroadcastService.js'
 import { AudienceCodec } from '../protocol/AudienceCodec.js'
 import { QwdClient } from '../qwd/QwdClient.js'
@@ -58,6 +59,7 @@ export class RoomServer {
       }),
       onTransportDropped: () => {
         this.audienceReactionService?.disconnected()
+        this.audienceChatGlobalService?.disconnected().catch(error => this.logger.warn?.({ err: error }, 'global chat disconnect cleanup failed'))
         this.liveBroadcastService?.disconnected().catch(error => this.logger.warn?.({ err: error }, 'live broadcast disconnect cleanup failed'))
         this.audienceService?.performance?.disconnected().catch(error => this.logger.warn?.({ err: error }, 'performance disconnect cleanup failed'))
         const deadline = Date.now() + 15000
@@ -215,6 +217,10 @@ export class RoomServer {
       sessionOf: playerId => this._sessionForPlayer(playerId),
       logger
     })
+    this.audienceChatGlobalService = new AudienceChatGlobalService({
+      audience: this.audienceService,
+      logger
+    })
     this.moveService = new MoveService({
       players: this.players,
       rooms: this.rooms,
@@ -309,6 +315,7 @@ export class RoomServer {
   async stop () {
     this.qwd.stop()
     this.tickLoop.stop()
+    await this.audienceChatGlobalService.stop()
     await this.transport.stop()
   }
   handleRoomIdConflict (roomId) {
@@ -358,6 +365,12 @@ export class RoomServer {
   }
   onTick () {
     this.audienceReactionService.tick()
+    if (!this.chatGlobalTick) {
+      const chatGlobal = this.audienceChatGlobalService
+      this.chatGlobalTick = chatGlobal.enqueue(() => chatGlobal.tick())
+        .catch(error => this.logger.warn?.({ err: error }, 'global chat tick failed'))
+        .finally(() => { this.chatGlobalTick = null })
+    }
     if (!this.performanceTick) {
       const authority = this.audienceService.performance
       this.performanceTick = authority.enqueue(() => authority.tick())

@@ -287,6 +287,10 @@ export const QWD_COMMANDS = new Map(
       const reactions = server.audienceReactionService
       return reactions.enqueue(() => reactions.apply(command.data))
     } },
+    'audience.chatGlobal': { async handle (command, server) {
+      const chatGlobal = server.audienceChatGlobalService
+      return chatGlobal.enqueue(() => chatGlobal.apply(command.data))
+    } },
     'seat.assign': seatAssign,
     'audience.snapshot': audienceSnapshot,
     'seat.release': seatRelease,
