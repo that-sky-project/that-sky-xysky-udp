@@ -22,7 +22,7 @@ test('default config is explicit, reusable, serializable and excludes runtime id
   const config = loadConfig({});
   assert.deepEqual(Object.keys(config), ['file', 'logging', 'room', 'qwd', 'metrics', 'debug']);
   assert.equal(config.file, null);
-  assert.deepEqual(config.logging, { level: 'info', pretty: false });
+  assert.deepEqual(config.logging, { level: 'info', pretty: true });
   assert.deepEqual(config.room, {
     host: '0.0.0.0', port: 19132, publicUri: '127.0.0.1:19132', publicHost: '127.0.0.1', publicPort: 19132,
     maxPeers: 64, channels: 2, tickRate: 10, maxPacketBytes: 16384,

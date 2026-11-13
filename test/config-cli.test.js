@@ -46,6 +46,9 @@ test('explicit boolean negation and an empty QWD URL work in both value forms', 
     { qwd: { url: '' }, logging: { pretty: false }, metrics: { enabled: false } });
   assert.equal(parseCliArgs(['--qwd-url', '']).overrides.qwd.url, '');
   assert.equal(loadConfig({}, parseCliArgs(['--qwd-url=']).overrides).qwd.url, '');
+  assert.equal(loadConfig({}, parseCliArgs([]).overrides).logging.pretty, true);
+  assert.equal(loadConfig({}, parseCliArgs(['--no-pretty']).overrides).logging.pretty, false);
+  assert.equal(loadConfig({ logging: { pretty: false } }, parseCliArgs([]).overrides).logging.pretty, false);
 });
 
 test('generated help and version return booleans without loading configuration', () => {

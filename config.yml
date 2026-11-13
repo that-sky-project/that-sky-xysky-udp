@@ -6,7 +6,7 @@ logging:
   # fatal | error | warn | info | debug | trace | silent; default: info.
   # Debug packet switches also require level debug or trace.
   level: info
-  # Human-readable logs. Default: false (structured JSON); no environment overrides.
+  # Human-readable logs. Default: true; false emits structured JSON. No environment overrides.
   pretty: true
 
 room:

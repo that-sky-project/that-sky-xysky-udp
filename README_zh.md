@@ -3,7 +3,7 @@
 [English](README.md) | 中文
 
 > [!IMPORTANT]
-> **Sky 客户端版本兼容性**
+> **Sky 客户端版本兼容性**——0.35.1 指 Sky 客户端版本，不是服务端包版本或 Node 版本。
 >
 > 本分支适配 **0.35.1 的 `PlayerState` 布局**。该布局会随 Sky 版本变化，而且即使是同一个版本，
 > 不同客户端构建写出的字段集也不完全一样：有些客户端会写 `state+0x52B8` 处的 8 字节字段，
@@ -27,7 +27,7 @@
 
 **XYSKY UDP** 是面向《Sky: Children of the Light》（客户端 0.35.1）网络协议的多人房间服务端。
 使用 Node.js 开发，基于 [ENet](https://www.npmjs.com/package/sky-enet) 提供可靠 UDP 游戏通信，
-并对外暴露只读的 HTTP 状态接口与 Prometheus 指标。
+并可选开启独立的 Prometheus HTTP 指标监听（默认关闭）。
 
 单个进程托管**一个房间**，最多 **8 名已加入玩家**。它既可以完全独立运行，也可以向 **QWD**
 房间管理器注册，让多个节点组成一个动态分配、自动均衡的集群。
@@ -59,7 +59,7 @@ XYSky ──HTTP(S) /allocate──▶ QWD ──WebSocket──▶ XYSKY UDP No
 ```
 
 此模式下，XYSky 的 `udp.uri` 是 QWD 的 **HTTP(S) `/allocate`** 地址，而节点的 `qwd.url` 是
-QWD 的 **WebSocket** 地址——两者是不同的端点。配套的管理器项目见 `qwd/`（[README](https://github.com/that-sky-project/that-sky-xysky-udp-room-authority/blob/main/README_zh.md)）。
+QWD 的 **WebSocket** 地址——两者是不同的端点。另见配套管理器项目（[README](https://github.com/that-sky-project/that-sky-xysky-udp-room-authority/blob/main/README_zh.md)）。
 
 ## 环境要求
 
@@ -89,7 +89,9 @@ Linux 需要 glibc 环境（基于 Ubuntu 22.04 构建），不支持 Alpine/mus
 # Windows: .\xysky-udp.exe --host 0.0.0.0 --port 7777 --public-uri 203.0.113.10:5413
 ```
 
-本机构建需要 **Node 22.23.5、Python 3、C++ 工具链**：
+本机构建需要 **Node 22**（建议 **22.23.5**，与 CI 一致）、Python 3 和 C/C++ 工具链。
+Windows SEA 构建还需要 Windows SDK 的 `signtool.exe`；构建脚本会自动查找，
+也可通过 `SIGNTOOL` 指定其路径：
 
 ```bash
 npm ci --ignore-scripts
@@ -110,7 +112,7 @@ npm install
 npm start
 ```
 
-使用默认 `config.yml` 时，节点监听：
+使用仓库内的部署配置 `config.yml` 时，节点监听：
 
 ```text
 ENet UDP: 0.0.0.0:19133
@@ -134,28 +136,49 @@ node src/main.js \
 
 | 参数 | 说明 |
 | --- | --- |
-| `--config <PATH>` | 加载的配置文件路径（默认 `./config.yml`） |
-| `--host <HOST>` | 房间服务器的监听地址 |
-| `--port <PORT>` | 房间服务器的 UDP 端口 |
-| `--public-uri <URI>` | 上报给 QWD 的公网 UDP 端点（`host:port`） |
-| `--qwd-url <URL>` | QWD 管理器的 WebSocket 地址，例如 `wss://...` |
+| `--config <PATH>` | YAML 路径（默认 `./config.yml`）；debug.yml 从其旁加载 |
+| `--host <HOST>` | ENet UDP 监听 hostname/IP |
+| `--port <PORT>` | ENet UDP 端口，1–65535 |
+| `--public-uri <URI>` | 公告 `host:port` 或 `udp://host:port` |
+| `--qwd-url <URL>` | `ws://` / `wss://` 管理器 URL；`--qwd-url=` 切回独立模式 |
+| `--log-level <LEVEL>` | fatal / error / warn / info / debug / trace / silent |
+| `--pretty`, `--no-pretty` | 开启可读日志 / 输出结构化 JSON |
+| `--max-peers <COUNT>` | ENet 连接槽，1–4095 |
+| `--channels <COUNT>` | ENet channel 数，1–255 |
+| `--tick-rate <HZ>` | 每秒同步 tick 数，1–1000 |
+| `--max-packet-bytes <BYTES>` | 接受的客户端数据包字节数，1–33554432 |
+| `--bad-packet-limit <COUNT>` | 坏包次数上限，1–1000000 |
+| `--move-timeout-ms <MS>` | MOVING 超时，1–2147483647 毫秒 |
+| `--player-state-decode <MODE>` | full / basic |
+| `--metrics`, `--no-metrics` | 开启 / 关闭 Prometheus HTTP 监听 |
+| `--metrics-host <HOST>` | Prometheus HTTP 监听 hostname/IP |
+| `--metrics-port <PORT>` | Prometheus TCP 端口，1–65535 |
+| `-h`, `--help` | 自动生成帮助，不启动服务 |
+| `-v`, `--version` | 输出服务端包版本，不启动服务 |
 
-`node src/main.js --help` 输出同样的参数列表。`debug.yml` 始终从所加载配置文件的
-同目录查找。
+Commander 负责帮助、版本、未知参数、缺少参数值和多余位置参数的错误提示。
+`--port=7777` 与 `--port 7777` 都可使用；字符串字段（包括看起来像数字的 hostname 和路径）
+保持字符串，数值字段交给共享 schema 校验。未传入布尔参数时，不会覆盖 YAML 文件值。
 
 ## 配置说明
 
 配置只来自 YAML 与显式 CLI 参数：**CLI > 所选文件 > schema 默认值**，不读取应用环境变量。
 未指定 `--config` 时使用当前工作目录的 `./config.yml`；文件不存在会报错。
-`debug.yml` 可选，始终从所选配置文件旁加载。Commander 负责参数解析、帮助、版本及错误提示；
-支持 `--port=7777`、`-h/--help`、`-v/--version`。
+相对路径会解析为绝对来源路径；`debug.yml` 可选，始终从所选配置文件旁加载。
 
-完整定义位于 `src/config/schema.js`，使用 **Zod v4**，包含默认值、数值范围、枚举和字段说明。
-未知配置键、null、空 YAML、字符串形式的数字/布尔值会报错；`{}` 表示全部使用默认值。
-YAML 错误包含文件路径与行列，schema 错误包含字段路径。房间 ID 属于运行时，不再混入配置。
-`config.schema.json` 与 `debug.schema.json` 由 `npm run schema` 生成，可用于 YAML 编辑器提示。
-复杂 URL 约束仍由运行时 schema 权威校验。当前部署文件保留 19133 端口、channels=1、
-192.168.11.4:19133 公告地址与 pretty=true；下表展示的是**内置默认值**。
+`src/config/schema.js` 导出可复用的 **Zod v4** `configSchema` 和 `debugFileSchema`，
+包含默认值、范围、枚举和字段说明。未知配置键、null、空 YAML、字符串形式的数字/布尔值会报错；
+`{}` 表示全部使用默认值。YAML 错误包含文件路径与行列，schema 错误包含字段路径。
+未知 debug 开关名称会警告并忽略，但开关值必须为布尔值，顶层配置键仍严格校验。
+
+修改 schema 后运行 `npm run schema`，重新生成 `config.schema.json` 与 `debug.schema.json`。
+YAML 编辑器可使用 `# yaml-language-server: $schema=./config.schema.json` 或
+`# yaml-language-server: $schema=./debug.schema.json` 获取提示。
+默认值、范围和说明来自 schema；复杂 URL 约束仍由运行时权威校验。
+
+下表展示的是 **schema 默认值**，不是部署值。仓库部署配置另用端口 **19133**、channels **1**、
+公告地址 **192.168.11.4:19133**。两者均默认开启 pretty 日志。
+可变房间 ID 属于运行时，不存入配置。
 
 | YAML 配置项 | 默认值 | CLI / 校验 |
 | --- | --- | --- |
@@ -176,15 +199,16 @@ YAML 错误包含文件路径与行列，schema 错误包含字段路径。房�
 | `metrics.host` | `127.0.0.1` | `--metrics-host` |
 | `metrics.port` | `9100` | `--metrics-port`：1–65535 |
 
-监听端点与公告端点独立；`--port` 不会自动改写 `public_uri`。公告地址支持 host:port、
-udp://host:port 和带方括号的 IPv6，不接受凭据、路径、查询或 fragment。不要公告 `0.0.0.0`。
-`--qwd-url=` 可临时覆盖已配置的管理器、切回独立运行。所有未传入的 CLI 参数保留文件值。
+监听端点与公告端点独立；`--port` 不会自动改写 `public_uri`。公告地址支持 `host:port`、
+`udp://host:port` 和带方括号的 IPv6，不接受凭据、路径、查询或 fragment；不要公告
+客户端无法访问的 `0.0.0.0`。QWD URL 支持 ws:// 或 wss://，不接受凭据/fragment，
+但允许路径和查询。`--qwd-url=` 可覆盖文件中的管理器配置并切回独立模式。
 
 ### Prometheus 与应用生命周期
 
 默认不会开放 HTTP 监听。开启 `metrics: { enabled: true, host: 127.0.0.1, port: 9100 }`
-或传入 `--metrics` 后，只提供 `GET /metrics`，其余请求返回 404。端点无鉴权，只应绑定可信
-抓取网络；每个应用拥有独立 Registry。
+或传入 `--metrics` 后，只提供带 Prometheus Content-Type 的 `GET /metrics`，其余请求返回 404。
+没有单独的 HTTP 状态接口，也没有鉴权，因此只应绑定可信抓取网络；每个应用拥有独立 Registry。
 
 `main.js` 负责 CLI/config/logging，`runtime/composition.js` 显式装配服务，`RoomServer`
 仅协调一次性生命周期。房间身份、遥测、预留槽位和迁移名单分别管理；ENet 监听成功后才注册 QWD。
@@ -192,8 +216,9 @@ udp://host:port 和带方括号的 IPv6，不接受凭据、路径、查询或 f
 `processLifecycle.js` 按逆序停止资源、记录清理失败并刷新日志；10 秒超时或第二次信号强制退出。
 关闭时先停止调度并排空命令/tick 工作，再清理状态；原生监听循环结束后才销毁 ENet host。
 
-本次不修改数据包处理器、codec 或 feature-service 实现。现有 Audience/Performance 双向依赖
-仍保留一个显式构造期绑定。验证命令：`npm test`、`npm run check`、`npm run schema`。
+数据包处理器、codec 和 feature service 与主程序生命周期装配保持分离；
+Audience/Performance 双向依赖保留一个显式构造期绑定。
+验证命令：`npm test`、`npm run check`、`npm run schema`。
 
 ## 连接状态机
 

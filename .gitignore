@@ -15,6 +15,7 @@ Thumbs.db
 test/*
 !test/config-cli.test.js
 !test/config-schema.test.js
+!test/documentation.test.js
 !test/main-smoke.test.js
 !test/metrics-server.test.js
 !test/process-lifecycle.test.js

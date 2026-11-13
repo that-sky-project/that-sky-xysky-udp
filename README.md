@@ -3,7 +3,7 @@
 English | [中文](README_zh.md)
 
 > [!IMPORTANT]
-> **Sky client version compatibility**
+> **Sky client version compatibility** — 0.35.1 refers to the Sky client, not the server package or Node version.
 >
 > This branch targets the **0.35.1 `PlayerState` layout**. The field layout changes between
 > Sky releases, and even builds of the same release do not always write the same field set:
@@ -44,7 +44,7 @@ dynamically allocated, auto-balancing fleet.
 > affiliated with or endorsed by thatgamecompany. You are responsible for ensuring your use
 > of client assets, network services, and deployment complies with applicable terms and law.
 
-## Deployment Modes
+## Deployment modes
 
 XYSKY UDP supports two modes, selected purely by whether `qwd.url` is set in `config.yml`.
 
@@ -71,7 +71,7 @@ XYSky ──HTTP(S) /allocate──▶ QWD ──WebSocket──▶ XYSKY UDP No
 
 In this mode XYSky's `udp.uri` is the QWD **HTTP(S) `/allocate`** address, while the node's
 `qwd.url` is the QWD **WebSocket** address — two different endpoints. See the companion
-manager project under `qwd/` ([README](https://github.com/that-sky-project/that-sky-xysky-udp-room-authority/blob/main/README.md)).
+manager project ([README](https://github.com/that-sky-project/that-sky-xysky-udp-room-authority/blob/main/README.md)).
 
 ## Requirements
 
@@ -102,7 +102,9 @@ Linux requires glibc (built on Ubuntu 22.04), not Alpine/musl. Windows executabl
 # Windows: .\xysky-udp.exe --host 0.0.0.0 --port 7777 --public-uri 203.0.113.10:5413
 ```
 
-Local builds require **Node 22.23.5**, Python 3 and a C/C++ toolchain:
+Local builds require **Node 22** (use **22.23.5** to match CI), Python 3 and a C/C++
+toolchain. Windows SEA builds also require Windows SDK `signtool.exe`; the builder
+finds it automatically, or accepts its path through `SIGNTOOL`:
 
 ```bash
 npm ci --ignore-scripts
@@ -117,7 +119,7 @@ are built on the target platform. Archives are extracted again and their executa
 is tested for help/version, ENet, metrics and JSON/pretty logging. Builds refuse to
 overwrite a same-named output directory; preserve or move previous outputs first.
 
-## Install And Run
+## Install and run
 
 ```bash
 npm install
@@ -132,7 +134,7 @@ ENet UDP: 0.0.0.0:19133
 
 TCP and UDP may share the same port number. Development mode with auto-reload: `npm run dev`.
 
-### Command Line Options
+### Command-line options
 
 Any flag passed on the command line overrides the same value in `config.yml`; flags you
 omit keep the file value (or the built-in default).
@@ -175,71 +177,54 @@ Omitted boolean flags do not override the YAML file.
 
 ## Configuration
 
-All configuration lives in **`config.yml`** (loaded from the working directory). The server
-reads **no environment variables** — explicit CLI overrides > YAML values > schema defaults.
-Relative config paths resolve from cwd; the runtime config records the absolute source path.
-The checked-in deployment preserves port **19133**, channels **1**, public address
-**192.168.11.4:19133** and pretty logs; these differ from the built-in defaults below.
+Explicit CLI overrides take precedence over YAML values, which take precedence over
+schema defaults. No application environment-variable overrides are read. Without
+`--config`, the main file is `./config.yml` relative to the current working directory;
+a missing file is an error. Relative paths are resolved to an absolute source path.
+`debug.yml` is optional and is loaded beside the selected configuration file.
 
-The reusable, documented **Zod v4** schemas are exported as `configSchema` and
-`debugFileSchema` from `src/config/schema.js`. Unknown configuration keys, null/empty YAML
-documents, quoted numbers and quoted booleans fail explicitly; use `{}` for all defaults.
-YAML syntax errors include the source path and line/column; validation uses Zod's readable
-field-path diagnostics. No legacy aliases are accepted. Room identity is mutable runtime
-state, not a configuration field.
+`src/config/schema.js` exports the reusable **Zod v4** `configSchema` and
+`debugFileSchema`. Unknown configuration keys, null/empty YAML documents and quoted
+numbers/booleans fail validation; `{}` requests all defaults. YAML errors include the
+source path and line/column; schema errors include field paths. Unknown debug switch
+names warn and are ignored, but switch values must be booleans and top-level keys are strict.
 
-`config.schema.json` and `debug.schema.json` are generated with Zod's native JSON Schema
-converter: run **`npm run schema`** after editing the source schema. `config.yml` includes a
-`yaml-language-server` schema directive; for debug.yml use
-`# yaml-language-server: $schema=./debug.schema.json`. Bounds, defaults and descriptions come
-from the schema source; URL refinements are authoritative in runtime validation and described
-in the generated schemas.
+Run `npm run schema` after schema changes to regenerate `config.schema.json` and
+`debug.schema.json`. YAML editors can use `# yaml-language-server: $schema=./config.schema.json`
+or `# yaml-language-server: $schema=./debug.schema.json`. Defaults, bounds and descriptions
+come from the source schema; complex URL constraints remain authoritative at runtime.
 
-Built-in defaults (not the checked-in deployment):
+The configuration reference below lists **schema defaults**, not deployment values.
+The checked-in deployment uses port **19133**, channels **1**, and public address
+**192.168.11.4:19133** instead. Pretty logs are enabled by default in both cases.
+No configuration field stores the mutable runtime room identity.
 
-```yaml
-logging:
-  level: info             # pino level; use "debug" for protocol diagnostics
-  pretty: true           # human-readable logs
-
-room:
-  host: 0.0.0.0           # ENet UDP bind address
-  port: 19132             # ENet UDP schema default
-  public_uri: 127.0.0.1:19132  # Advertised endpoint schema default
-  max_peers: 64           # ENet connection slots (joined players still capped at 8)
-  channels: 2             # ENet channels
-  tick_rate: 10           # sync ticks per second
-  max_packet_bytes: 16384 # max accepted client packet size
-  bad_packet_limit: 8     # close a session after this many malformed packets
-  move_timeout_ms: 20000  # revert a stuck MOVING session to ACTIVE after this (ms)
-  player_state_decode: full  # full | basic (basic = position + velocity only)
-
-qwd:
-  url: ""                 # EMPTY => standalone. Set a wss:// address to use a QWD manager.
-```
-
-| Key | Default | Description |
+| YAML key | Default | CLI / validation |
 | --- | --- | --- |
-| `logging.level` | `info` | Pino log level |
-| `logging.pretty` | `false` | Human-readable logs; no environment override |
-| `room.host` | `0.0.0.0` | ENet UDP bind address |
-| `room.port` | `19132` | ENet UDP port |
-| `room.public_uri` | `127.0.0.1:19132` | Public UDP endpoint clients can reach |
-| `room.max_peers` | `64` | ENet connection slots; joined players capped at 8 |
-| `room.channels` | `2` | ENet channel count |
-| `room.tick_rate` | `10` | Synchronization ticks per second |
-| `room.max_packet_bytes` | `16384` | Maximum client packet size |
-| `room.bad_packet_limit` | `8` | Malformed-packet limit before the session is closed |
-| `room.move_timeout_ms` | `20000` | Revert a session stuck in MOVING back to ACTIVE after this |
-| `room.player_state_decode` | `full` | `full` parses every `PlayerState` field; `basic` reads only `stateKind` + position + velocity |
-| `qwd.url` | `""` | QWD WebSocket URL. **Empty = standalone, no manager connection.** |
+| `logging.level` | `info` | `--log-level`: fatal/error/warn/info/debug/trace/silent |
+| `logging.pretty` | `true` | `--pretty` / `--no-pretty` |
+| `room.host` | `0.0.0.0` | `--host`: bind hostname/IP |
+| `room.port` | `19132` | `--port`: integer 1–65535 |
+| `room.public_uri` | `127.0.0.1:19132` | `--public-uri`: client-reachable UDP endpoint |
+| `room.max_peers` | `64` | `--max-peers`: integer 1–4095; joined players remain capped at 8 |
+| `room.channels` | `2` | `--channels`: integer 1–255 |
+| `room.tick_rate` | `10` | `--tick-rate`: integer 1–1000 |
+| `room.max_packet_bytes` | `16384` | `--max-packet-bytes`: integer 1–33554432 |
+| `room.bad_packet_limit` | `8` | `--bad-packet-limit`: integer 1–1000000 |
+| `room.move_timeout_ms` | `20000` | `--move-timeout-ms`: integer 1–2147483647 |
+| `room.player_state_decode` | `full` | `--player-state-decode`: full/basic |
+| `qwd.url` | `""` | `--qwd-url`: empty, ws:// or wss:// |
+| `metrics.enabled` | `false` | `--metrics` / `--no-metrics` |
+| `metrics.host` | `127.0.0.1` | `--metrics-host`: HTTP bind hostname/IP |
+| `metrics.port` | `9100` | `--metrics-port`: integer 1–65535 |
 
 ### `room.public_uri`
 
-This is the UDP address **clients must be able to reach**, which is often different from the
-bind `host`. Behind NAT or on a cloud host, set it to your public `IP:Port` (for example
-`123.123.123.123:19133`), not to `0.0.0.0`. It is the value reported to QWD and handed to
-clients.
+The bind endpoint and advertised endpoint are independent: `--port` never rewrites
+`public_uri`. Public endpoints accept `host:port`, `udp://host:port` and bracketed IPv6,
+but reject credentials, paths, queries and fragments. Advertise an endpoint clients can
+reach, not `0.0.0.0`. QWD URLs accept ws:// or wss://, reject credentials/fragments, and
+allow paths/queries. Use `--qwd-url=` to override a configured manager and run standalone.
 
 ### Enabling / disabling QWD
 
@@ -252,8 +237,8 @@ clients.
 Prometheus is disabled by default. Enable `metrics: { enabled: true, host: 127.0.0.1,
 port: 9100 }`, or use `--metrics --metrics-host 127.0.0.1 --metrics-port 9100`.
 Only `GET /metrics` is served with the registry's Prometheus content type; other
-requests return 404. There is no authentication, so use a trusted scraping network.
-The registry is isolated per application.
+requests return 404. There is no separate HTTP status API and no authentication, so use
+a trusted scraping network. The registry is isolated per application.
 
 `main.js` loads configuration and logging, then `runtime/composition.js` explicitly
 constructs services. `RoomServer` coordinates a single-use lifecycle; room identity,
@@ -264,11 +249,11 @@ registered resources in reverse order, reports cleanup failures and flushes logg
 a 10-second deadline or second signal forces exit. Async commands/tick lanes are drained
 before state cleanup, and the native listen loop ends before host destruction.
 
-Packet handlers, codecs and feature-service implementations are outside this refactor.
-The existing audience/authority cycle remains one explicit construction-time attachment.
+Packet handlers, codecs and feature services remain separate from main-program lifecycle
+wiring. The audience/authority cycle has one explicit construction-time attachment.
 Use `npm test`, `npm run check` and `npm run schema` for verification.
 
-## Connection State Machine
+## Connection state machine
 
 ```mermaid
 stateDiagram-v2
