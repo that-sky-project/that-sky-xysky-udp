@@ -389,8 +389,10 @@ function playerState(io, v = {}) {
   o.offset_5bab = io.bool(v.offset_5bab);
   o.offset_5b8a = io.u8(v.offset_5b8a);
   // Two 2-bit clamps at 0x5B79/0x5B7A sit between 0x5B8A and the outfit block.
-  o.offset_5b79 = io.bounded(v.offset_5b79, 0, 2, 'offset_5b79');
-  o.offset_5b7a = io.bounded(v.offset_5b7a, 0, 2, 'offset_5b7a');
+  // 2 bits on the wire = 0..3: live 0.35.1 clients send 3 (2026-11-14 capture),
+  // so the earlier 0..2 bound rejected a legal value. Width unchanged.
+  o.offset_5b79 = io.bounded(v.offset_5b79, 0, 3, 'offset_5b79');
+  o.offset_5b7a = io.bounded(v.offset_5b7a, 0, 3, 'offset_5b7a');
   // outfit (0x5920), then 0x5B7B u8, 0x5B58 u32, 0x5B6C bounded u8.
   o.outfit = io.scoped('outfit', () => outfitState(io, v.outfit));
   o.offset_5b7b = io.u8(v.offset_5b7b);
@@ -603,10 +605,12 @@ function animState(io, v = {}) {
     raw: io.f32(v.raw),
     reserved: Array.from({ length: 4 }, (_, i) => io.u8(v.reserved?.[i] ?? v.bytes?.[i])),
     // AvatarPose::Update treats 7 as "action animation in progress" and uses
-    // it to gate the blend weights below.
-    mode: io.bounded(v.mode, 0, 8),
-    // suspected: clip variant within the layer.
-    variant: io.bounded(v.variant, 0, 10),
+    // it to gate the blend weights below. 0.35.1 live traffic carries 14 as
+    // well (2026-11-14 private-server capture), so the field is the full
+    // 4-bit slot (0..15); the earlier 0..8 bound rejected it.
+    mode: io.bounded(v.mode, 0, 15),
+    // suspected: clip variant within the layer. Same 4-bit slot as mode.
+    variant: io.bounded(v.variant, 0, 15),
     // suspected: 3-way animation blend weights.
     weights: Array.from({ length: 3 }, (_, i) => io.qf(v.weights?.[i], 0, 1, 0, 5)),
     flag: io.bool(v.flag),
