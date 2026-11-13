@@ -177,7 +177,12 @@ export class AudienceChatGlobalService {
   }
 
   disconnected () {
-    return this.enqueue(() => this.disconnect())
+    // A transient node↔QWD WebSocket blip must not kill the countdown: closing
+    // here made every client destroy its chat object (the packet 26 close
+    // shares the performance-cleanup entry), and no client could re-show chat
+    // without re-entering the map. Keep the states and deadlines instead — QWD
+    // re-projects the state on reconnect, and tick() still closes at the
+    // deadline (fail-closed even if QWD never returns).
   }
 
   stop () {

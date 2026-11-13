@@ -77,6 +77,17 @@ test('leases expire on monotonic time despite rollback; replay and reconnect req
   assert(n.live.canPublish(A, L))
 })
 
+test('node wall drift is re-calibrated from every capability refresh instead of the frozen epoch offset', async () => {
+  const n = await setup()
+  n.time.wall += 40000
+  // The QWD wall barely moved while the node wall jumped ahead: with the
+  // epoch-frozen mapping the remaining arithmetic reads negative forever and
+  // every refresh is rejected as 'expired' — the slow disappearance of the
+  // broadcast state. Each capability carries fresh serverNowMs to recalibrate.
+  assert.equal((await n.live.capability(cap({ revision: 2, serverNowMs: 100500, expiresAtMs: 130500 }))).code, 0)
+  assert(n.live.canPublish(A, L))
+})
+
 test('failed capability ACK output retries do not renew same-revision lease during wall rollback', async () => {
   const n = await setup(), send = n.audience.sendToClient
   n.audience.sendToClient = async () => -1
@@ -91,7 +102,7 @@ test('failed capability ACK output retries do not renew same-revision lease duri
   assert(!n.live.canPublish(A, L))
 })
 
-test('epoch mismatch retries until performance ready; disconnect clears ephemeral state without clear10145', async () => {
+test('epoch mismatch retries until performance ready; disconnect rides out the lease without revoke', async () => {
   const n = await setup()
   assert.notEqual((await n.live.capability(cap({ authorityEpoch: 'next' }))).code, 0)
   await n.authority.state({ authorityEpoch: 'next', revision: 1, levelId: L, serverNowMs: 100000,
@@ -99,7 +110,13 @@ test('epoch mismatch retries until performance ready; disconnect clears ephemera
   assert(!n.live.canPublish(A, L))
   assert.equal((await n.live.capability(cap({ authorityEpoch: 'next' }))).code, 0)
   n.output.length = 0; await n.live.disconnected()
-  assert(!n.live.canPublish(A, L)); assert.equal(n.live.pending.size, 0); assert.equal(n.live.streams.size, 0)
+  // A blip keeps the granted lease: publish eligibility survives, only the
+  // ephemeral content queues are cleared, and no revocation is projected.
+  assert(n.live.canPublish(A, L)); assert.equal(n.live.pending.size, 0); assert.equal(n.live.streams.size, 0)
+  assert.equal(n.output.length, 0)
+  // Fail-closed: past the lease deadline the next tick expires it.
+  n.time.mono = n.live.capabilities.get(L).deadline; await n.live.tick()
+  assert(!n.live.canPublish(A, L))
   assert(n.output.every(row => row.packet.id === 28 && row.packet.payload.flags[2] === false))
 })
 

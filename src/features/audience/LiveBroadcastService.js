@@ -9,7 +9,14 @@ const MAX_BYTES = 48 * 1024
 const MAX_PENDING = 32
 const MAX_SEEN = 2048
 const MAX_STREAMS = 128
-const LEASE_MS = 5000
+// Capability lease length. It must cover transient node↔QWD WebSocket blips:
+// revoking on every disconnect made the broadcast state disappear under公网
+// WSS jitter, and only a map re-entry restored it. QWD keeps refreshing the
+// same lease across reconnects, so a short blip rides out seamlessly; a real
+// outage still expires everything within this window (fail-closed).
+const LEASE_MS = 30_000
+// Content-side rotation stays tight: QWD prunes idle streams at 5s regardless.
+const UPLOAD_IDLE_MS = 5_000
 const EVENT_TTL_MS = 3000
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && value.trim() === value
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
@@ -75,8 +82,13 @@ export class IndependentLiveBroadcastService {
     }))
   }
   async disconnected () {
+    // A transient node↔QWD WebSocket blip must not kill the broadcast state:
+    // keep the granted leases and let tick()/reconcile() expire them at their
+    // own deadlines (fail-closed within LEASE_MS). Only the ephemeral content
+    // queues are cleared — nothing can be delivered while QWD is unreachable.
+    // This.available stays false so no new uploads/publishes are accepted.
     this.available = false
-    await this.revoke(new Set(this.capabilities.keys()))
+    this.clearEphemeral()
   }
   async reconcile () {
     const epoch = this.authority()?.authorityEpoch ?? null
@@ -91,8 +103,11 @@ export class IndependentLiveBroadcastService {
     if (expired.size) await this.revoke(expired)
   }
   validCapability (cap) {
-    return Boolean(cap && this.ready(cap.levelId) && cap.authorityEpoch === this.authority().authorityEpoch &&
-      this.monotonic() < cap.deadline && this.clock() + this.authority().offsets.get(cap.levelId) < cap.expiresAtMs)
+    // Deliberately does NOT consult ready()/authority availability: a transient
+    // node↔QWD WebSocket blip must not invalidate a lease QWD already granted.
+    // The monotonic deadline and wall expiry below are the fail-closed guards.
+    return Boolean(cap && cap.authorityEpoch === this.authority().authorityEpoch &&
+      this.monotonic() < cap.deadline && this.clock() + this.authority().leaseOffset(cap.levelId) < cap.expiresAtMs)
   }
   canPublish (playerId, levelId) {
     if (!uuid(playerId)) return false
@@ -116,13 +131,17 @@ export class IndependentLiveBroadcastService {
     if (!this.ready(data.levelId) || data.authorityEpoch !== this.epoch) return this.capabilityAck(data, false, 'unsynced')
     const allowedPlayerIds = canonicalIds(data.allowedPlayerIds)
     if (this.retiredCapabilities.has(`${data.levelId}:${data.capabilityId}`)) return this.capabilityAck(data, false, 'retired')
+    // Recalibrate the node↔QWD clock mapping from the freshest authoritative
+    // timestamp before any deadline arithmetic; without this, node↔QWD clock
+    // drift slowly shrank `remaining` until every refresh read as expired.
+    this.authority().calibrateClock(data.levelId, data.serverNowMs)
     const previous = this.history.get(data.levelId)
     if (previous && (data.revision < previous.revision || data.serverNowMs < previous.serverNowMs ||
       (data.revision === previous.revision && (data.capabilityId !== previous.capabilityId || data.expiresAtMs !== previous.expiresAtMs)) ||
       (data.capabilityId === previous.capabilityId && !isDeepStrictEqual(allowedPlayerIds, previous.allowedPlayerIds)))) {
       return this.capabilityAck(data, false, 'conflict')
     }
-    const remaining = Math.min(LEASE_MS, data.expiresAtMs - (this.clock() + this.authority().offsets.get(data.levelId)))
+    const remaining = Math.min(LEASE_MS, data.expiresAtMs - (this.clock() + this.authority().leaseOffset(data.levelId)))
     if (remaining <= 0) return this.capabilityAck(data, false, 'expired')
     const old = this.capabilities.get(data.levelId)
     // A replay cannot restart a monotonic lease, even after wall rollback or reconnect.
@@ -135,7 +154,7 @@ export class IndependentLiveBroadcastService {
     if (old && old.capabilityId !== data.capabilityId) await this.revoke(new Set([data.levelId]))
     const deadline = old && previous?.revision === data.revision ? Math.min(old.deadline, this.monotonic() + remaining) : this.monotonic() + remaining
     const cap = { ...data, allowedPlayerIds, allowed: new Set(allowedPlayerIds), deadline,
-      acceptedAt: this.monotonic(), serverAt: Math.max(data.serverNowMs, this.clock() + this.authority().offsets.get(data.levelId),
+      acceptedAt: this.monotonic(), serverAt: Math.max(data.serverNowMs, this.clock() + this.authority().leaseOffset(data.levelId),
         old ? old.serverAt + this.monotonic() - old.acceptedAt : 0) }
     this.history.set(data.levelId, { ...cap, allowed: undefined })
     this.capabilities.set(data.levelId, cap)
@@ -152,13 +171,13 @@ export class IndependentLiveBroadcastService {
       !Number.isFinite(request?.timestamp) || !Number.isInteger(request.actionId) || request.actionId < 0 || request.actionId > 0xffffffff ||
       !Buffer.isBuffer(request.payload) || request.payload.length === 0 || request.payload.length > MAX_BYTES) return false
     let source = this.uploads.get(session)
-    if (!source || source.levelId !== levelId || source.generation !== generation || this.monotonic() - source.lastAt >= LEASE_MS) {
+    if (!source || source.levelId !== levelId || source.generation !== generation || this.monotonic() - source.lastAt >= UPLOAD_IDLE_MS) {
       source = { levelId, generation, streamId: this.id(), lastAt: this.monotonic() }
       this.uploads.set(session, source)
     }
     const accepted = this.send('liveBroadcast.publish', { player: { playerId }, levelId,
       capabilityId: this.capabilities.get(levelId).capabilityId, sourceStreamId: source.streamId,
-      eventId: this.id(), timestamp: request.timestamp + this.authority().offsets.get(levelId) / 1000,
+      eventId: this.id(), timestamp: request.timestamp + this.authority().leaseOffset(levelId) / 1000,
       actionId: request.actionId, payloadBase64: request.payload.toString('base64') })
     if (accepted) source.lastAt = this.monotonic()
     return accepted
@@ -182,7 +201,7 @@ export class IndependentLiveBroadcastService {
     return this.sessionOf(recipient.playerId) === session && this.authority()?.validSource(session, levelId, recipient.generation)
   }
   expired (entry) {
-    return this.monotonic() >= entry.deadline || this.clock() + (this.authority()?.offsets.get(entry.data.levelId) ?? 0) >= entry.data.expiresAtMs
+    return this.monotonic() >= entry.deadline || this.clock() + this.authority().leaseOffset(entry.data.levelId) >= entry.data.expiresAtMs
   }
   usable (entry) {
     const cap = this.capabilities.get(entry.data.levelId)
@@ -208,7 +227,7 @@ export class IndependentLiveBroadcastService {
     if (entry && !isDeepStrictEqual(identity(entry.data), identity(data))) return this.ack(data, false, 'conflict')
     if (!entry) {
       const remaining = Math.min(EVENT_TTL_MS, data.expiresAtMs - Math.max(
-        this.clock() + this.authority().offsets.get(data.levelId), cap.serverAt + this.monotonic() - cap.acceptedAt))
+        this.clock() + this.authority().leaseOffset(data.levelId), cap.serverAt + this.monotonic() - cap.acceptedAt))
       if (remaining <= 0) return this.ack(data, false, 'expired')
       if (this.pending.size >= MAX_PENDING) return this.ack(data, false, 'busy')
       const sourceKey = `${data.levelId}:${data.playerId}`, streamKey = `${sourceKey}:${data.streamId}`
@@ -250,7 +269,7 @@ export class IndependentLiveBroadcastService {
       if (!this.usable(entry)) return this.ack(data, false, 'expired')
       if (this.audience.barn.getEntityForPlayer(data.playerId) !== entity || entity.levelId !== data.levelId) return this.ack(data, false, 'missing_entity', ErrorCode.NOT_FOUND)
       await this.audience.broadcastPerformance({ sessionId: identityHashOfPlayerId(data.playerId),
-        time: data.timestamp - this.authority().offsets.get(data.levelId) / 1000, counter: data.actionId,
+        time: data.timestamp - this.authority().leaseOffset(data.levelId) / 1000, counter: data.actionId,
         json: Buffer.from(data.payloadBase64, 'base64'), levelId: data.levelId,
         submitted: entry.submitted, recipientKey: playerId => this.sessionOf(playerId), recipientValid })
     } catch (error) {
@@ -271,7 +290,7 @@ export class IndependentLiveBroadcastService {
     // source before retrying. A local timer cannot resurrect a departed source.
     for (const [key, entry] of this.pending) if (!this.usable(entry)) this.finish(key, entry, false, 'expired')
     for (const [key, stream] of this.streams) {
-      if (this.monotonic() - stream.lastAt >= LEASE_MS) stream.retired = true
+      if (this.monotonic() - stream.lastAt >= UPLOAD_IDLE_MS) stream.retired = true
       if (this.monotonic() >= stream.retireAt) {
         this.streams.delete(key)
         for (const [source, current] of this.sources) if (current === key) this.sources.delete(source)

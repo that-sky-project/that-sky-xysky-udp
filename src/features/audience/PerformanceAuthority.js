@@ -50,6 +50,11 @@ export class PerformanceAuthority {
     this.retiredEpochs = new Set()
     this.expired = new Set()
     this.offsets = new Map()
+    // Lease arithmetic only (live broadcast TTL checks). Refreshed far more
+    // often than `offsets`, which must stay frozen per epoch: AudienceService
+    // projects client-visible session times through `offsets`, and refreshing
+    // it would shift a running countdown on every state arrival.
+    this.leaseOffsets = new Map()
     this.available = false
     this.operationChain = Promise.resolve()
     this.lastSyncAt = -Infinity
@@ -73,6 +78,22 @@ export class PerformanceAuthority {
   send (event, data) {
     if (!this.available) return false
     return this.publish(event, { roomId: this.roomId(), ...data }) === true
+  }
+
+  /**
+   * Re-derive the QWD-to-node clock mapping from a fresh authoritative
+   * timestamp into the lease-only map. Called on every liveBroadcast capability
+   * so lease validation tracks the actual node↔QWD skew instead of a value
+   * frozen at epoch start. Never touches `offsets` — client-visible session
+   * countdowns project through the frozen mapping and must not shift.
+   */
+  calibrateClock (levelId, serverNowMs) {
+    if (!Number.isSafeInteger(serverNowMs)) return
+    this.leaseOffsets.set(levelId, serverNowMs - this.clock())
+  }
+
+  leaseOffset (levelId) {
+    return this.leaseOffsets.get(levelId) ?? this.offsets.get(levelId) ?? 0
   }
 
   sync (force = false) {
@@ -183,7 +204,7 @@ export class PerformanceAuthority {
       if (this.authorityEpoch) this.retiredEpochs.add(this.authorityEpoch)
       while (this.retiredEpochs.size > 16) this.retiredEpochs.delete(this.retiredEpochs.values().next().value)
       for (const levelId of this.states.keys()) await this.audience.clearPerformance(levelId)
-      this.states.clear(); this.cursors.clear(); this.buffers.clear(); this.eventIds.clear(); this.submitted.clear(); this.expired.clear(); this.offsets.clear(); this.deadlines.clear(); this.preparationClocks.clear()
+      this.states.clear(); this.cursors.clear(); this.buffers.clear(); this.eventIds.clear(); this.submitted.clear(); this.expired.clear(); this.offsets.clear(); this.leaseOffsets.clear(); this.deadlines.clear(); this.preparationClocks.clear()
       this.authorityEpoch = state.authorityEpoch
     }
     const previous = this.states.get(state.levelId)
@@ -209,8 +230,12 @@ export class PerformanceAuthority {
       this.cursors.delete(old.sessionId)
     }
     this.states.set(state.levelId, state)
-    // Fix the QWD-to-node clock mapping for this authority epoch. Queue or
-    // heartbeat states must not keep moving a session's client deadline.
+    // Fix the QWD-to-node clock mapping once per level per authority epoch.
+    // This offset projects client-visible session times (AudienceService
+    // startTime), so it must stay frozen — refreshing it on every state
+    // arrival shifts a running countdown by whatever the node↔QWD walls
+    // drifted since epoch start. Lease arithmetic tracks the fresh mapping
+    // separately via calibrateClock()/leaseOffset() instead.
     if (!this.offsets.has(state.levelId)) this.offsets.set(state.levelId, state.serverNowMs - this.clock())
     if (state.current && !this.deadlines.has(state.current.sessionId)) {
       this.deadlines.set(state.current.sessionId, this.monotonic() + Math.max(0,
