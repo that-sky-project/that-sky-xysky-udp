@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "XYSKY UDP configuration. All sections are optional and defaulted. Unknown keys and null values are errors; numbers and booleans must be native YAML values. CLI overrides are merged before validation.",
+  "type": "object",
+  "properties": {
+    "logging": {
+      "default": {},
+      "description": "Logging settings. No environment-variable overrides.",
+      "type": "object",
+      "properties": {
+        "level": {
+          "description": "Pino minimum log level. Packet diagnostics require debug or trace.",
+          "default": "info",
+          "type": "string",
+          "enum": [
+            "fatal",
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace",
+            "silent"
+          ]
+        },
+        "pretty": {
+          "description": "Human-readable logs using pino-pretty; false emits structured JSON.",
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "room": {
+      "default": {},
+      "description": "Immutable room configuration. Room identity is created and managed by the runtime, not stored in config.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "ENet UDP bind hostname or IP address; independent of the advertised public endpoint.",
+          "default": "0.0.0.0",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "port": {
+          "description": "ENet UDP listening port, 1-65535.",
+          "default": 19132,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "public_uri": {
+          "description": "Public UDP endpoint advertised to clients/QWD. Use host:port or udp://host:port; IPv6 must be bracketed. No credentials, path, query or fragment. Port: 1-65535.",
+          "default": "127.0.0.1:19132",
+          "type": "string",
+          "minLength": 1
+        },
+        "max_peers": {
+          "description": "ENet connection slots, 1-4095 (ENet peer-ID limit). Joined players remain capped at 8.",
+          "default": 64,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4095
+        },
+        "channels": {
+          "description": "ENet channel count, 1-255 (ENet limit).",
+          "default": 2,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "tick_rate": {
+          "description": "Synchronization ticks per second, 1-1000. Upper bound prevents sub-millisecond timers.",
+          "default": 10,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "max_packet_bytes": {
+          "description": "Maximum accepted client packet bytes, 1-33554432 (32 MiB ENet packet ceiling).",
+          "default": 16384,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 33554432
+        },
+        "bad_packet_limit": {
+          "description": "Malformed-packet count before closing a session, 1-1000000.",
+          "default": 8,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "move_timeout_ms": {
+          "description": "Milliseconds before reverting a stuck MOVING session to ACTIVE, 1-2147483647 (Node timer limit).",
+          "default": 20000,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "player_state_decode": {
+          "description": "PlayerState decode depth: full reads the complete record; basic reads stateKind, position and velocity. First frame is always full for layout detection.",
+          "default": "full",
+          "type": "string",
+          "enum": [
+            "full",
+            "basic"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "qwd": {
+      "default": {},
+      "description": "Optional QWD room-manager connection.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "QWD WebSocket URL (ws:// or wss://), without credentials or fragment. Empty string disables QWD and runs standalone. Paths and queries are allowed.",
+          "default": "",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "default": {},
+      "description": "Optional Prometheus metrics service, owned and stopped by the application lifecycle.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable the separate Prometheus HTTP listener. Disabled by default: no metrics listener is opened.",
+          "default": false,
+          "type": "boolean"
+        },
+        "host": {
+          "description": "Metrics HTTP bind hostname or IP address. Loopback is the safe default; use a trusted network for remote scraping.",
+          "default": "127.0.0.1",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "port": {
+          "description": "Metrics HTTP TCP port, 1-65535; separate from the ENet UDP listener.",
+          "default": 9100,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

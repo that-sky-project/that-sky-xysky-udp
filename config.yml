@@ -1,34 +1,49 @@
+# yaml-language-server: $schema=./config.schema.json
+# Schema source: src/config/schema.js. Regenerate JSON: node src/config/generateSchemas.js
+# Unknown keys and nulls are errors. Use native YAML booleans/numbers, not quoted strings.
+# Every option is shown here; these deployment values are not necessarily schema defaults.
 logging:
+  # fatal | error | warn | info | debug | trace | silent; default: info.
+  # Debug packet switches also require level debug or trace.
   level: info
+  # Human-readable logs. Default: false (structured JSON); no environment overrides.
   pretty: true
 
 room:
+  # ENet UDP bind hostname/IP; default: 0.0.0.0. Independent of public_uri.
   host: 0.0.0.0
+  # 1-65535; schema default: 19132. This deployment intentionally uses 19133.
   port: 19133
-  # Public UDP endpoint reported to qwd. This is intentionally separate from host.
+  # Advertised endpoint: host:port or udp://host:port; bracket IPv6, e.g. [::1]:19132.
+  # No credentials, path, query or fragment. Default: 127.0.0.1:19132.
+  # Preserve this deployment address; behind NAT set it to an address clients can reach.
   public_uri: 192.168.11.4:19133
+  # ENet slots: 1-4095, default 64; joined players are still limited to 8.
   max_peers: 64
+  # ENet channel count: 1-255, default 2. This deployment intentionally uses 1.
   channels: 1
+  # Ticks per second: 1-1000, default 10 (no sub-millisecond timers).
   tick_rate: 10
+  # Accepted client packet bytes: 1-33554432 (32 MiB ENet limit), default 16384.
   max_packet_bytes: 16384
+  # Malformed-packet limit before closing a session: 1-1000000, default 8.
   bad_packet_limit: 8
-  # Revert a session stuck in MOVING back to ACTIVE if the client neither
-  # completes the move nor disconnects within this window (ms).
+  # Revert a stuck MOVING session to ACTIVE after this many ms.
+  # 1-2147483647 (Node timer limit), default 20000.
   move_timeout_ms: 20000
-  # PlayerState decode depth.
-  #   full  - parse every field of the client's state record (default)
-  #   basic - stop after stateKind + position + the move block (velocity).
-  #           Cross-room migration only needs position and velocity, so this
-  #           mode skips the body/queued/outfit records entirely: less CPU and
-  #           far less exposure to layout changes between client builds.
-  # The first frame per player is always decoded in full to detect which
-  # client build it is; later frames use the cheap path.
+  # full (default): decode complete PlayerState; basic: stateKind, position, velocity.
+  # First frame per player is always full to detect the client layout.
   player_state_decode: full
 
-# Room Authority / Room Manager (QWD) link.
-# Leave url empty to run this node standalone as a single 8-player room:
-# it will NOT connect to or register with any manager.
-# Fill in the QWD WebSocket address (e.g. wss://your-qwd-host) to enable
-# manager-coordinated room allocation and cross-room moves.
 qwd:
+  # Empty (default) = standalone: no manager connection or registration.
+  # Otherwise ws:// or wss:// URL, without credentials/fragment; paths/queries allowed.
   url: ""
+
+metrics:
+  # Optional, separate Prometheus HTTP service. Default false opens no listener.
+  enabled: false
+  # Default loopback. Expose only on a trusted scraping network.
+  host: 127.0.0.1
+  # TCP port 1-65535, default 9100. Only GET /metrics is served; other requests get 404.
+  port: 9100
