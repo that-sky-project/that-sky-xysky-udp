@@ -1,21 +1,22 @@
-// Gift RPC (MetaClass hash 0x20d9b9b3 — wire bytes b3 b9 d9 20, flags 0x00)
+// Gift RPC (MetaClass hash 0x20d9b9b3 — wire bytes b3 b9 d9 20, record flags byte 0x00)
 //
-// Capture-verified record layout (rpcData, GameMsg type 2):
-//   [0]      slot        u8    associated player slot
-//   [1..4]   classHash   u32   LE = 0x20d9b9b3
-//   [5]      flags       u8    0x00 on every captured gift packet
-//   [6..7]   bodyLen     u16   LE (<= 0x1000)
-//   [8..]    body
+// Record chain framing (see NetRpcCodec.js): live client traffic is no-slot
+// ([classHash u32 LE][flags u8][bodyLen u16 LE][body]); official relayed
+// traffic prefixes each record with a 1-byte slot. The BODY layout is
+// framing-independent and is byte-verified from four sources:
 //
-// Gift body (from the official DOWN capture, 83-byte packet):
-//   [0..1]   sender/receiver slots (1d 1f in the capture)
-//   [2..3]   type/sequence pair (01 01 on accept)
-//   [4..7]   ability/gift id u32 LE
-//   [8..9]   short fields
-//   [10..25] receiver uuid u8[16]  <- server injects the accepting player's
-//            uuid here on ACCEPT; at rpcData offset 18, matching the old
-//            flat-header offset, which is why live gifts kept working.
-//   [26..]   trailing fields / optional name bytes
+//   * official packetdump_20260913131425: 7 accept records (flag=1), the
+//     16-byte uuid is v4-valid ONLY at body[11..27] (0/7 at offsets 10/12);
+//   * live session logs: the accept C2S carries the accepting player's own
+//     uuid at body[11..27] (fe2ab94d-f211-451f-94ba-32ad9562597d);
+//   * the annotated 36-byte capture: [0..2] slots, [2] type_flag,
+//     [3..7] ability_id u32 LE, [7..11] item_count u32 LE, [11..27]
+//     signed_receiver_uuid, [27..31] extra, [31..36] trailing;
+//   * the reference server implementation patches no-slot rpcData[18..34]
+//     == body[11..27].
+//
+// Official 72-byte DOWN relays additionally append a u32-prefixed 32-char
+// ascii uuid after the base 36-byte body; the base layout above is unchanged.
 
 export const GIFT_CLASS_HASH = 0x20d9b9b3
 
@@ -26,8 +27,8 @@ export const GiftTypeFlag = Object.freeze({
   Cancel:   3
 })
 
-// body offset of the 16-byte receiver uuid
-const RECEIVER_UUID_BODY_OFFSET = 12
+// body offset of the 16-byte signed receiver uuid
+const RECEIVER_UUID_BODY_OFFSET = 11
 const RECEIVER_UUID_LENGTH = 16
 
 export function decodeGiftBody (body) {
@@ -35,6 +36,9 @@ export function decodeGiftBody (body) {
     return null
   }
   return {
+    typeFlag: body[2],
+    abilityId: body.readUInt32LE(3),
+    itemCount: body.readUInt32LE(7),
     receiverUuid: body.subarray(
       RECEIVER_UUID_BODY_OFFSET,
       RECEIVER_UUID_BODY_OFFSET + RECEIVER_UUID_LENGTH
@@ -55,6 +59,7 @@ export function patchGiftReceiverUuidInBody (body, uuidBytes) {
   return patched
 }
 
-// Backwards-shaped alias kept for any caller still thinking in rpcData
-// offsets: rpcData offset 18 == body offset 10 with the 8-byte record header.
+// Kept for callers thinking in rpcData offsets: in no-slot framing the body
+// starts at rpcData+7, so body offset 11 == no-slot rpcData offset 18 — the
+// same absolute offset the reference server patches.
 export const RECEIVER_UUID_OFFSET = 18

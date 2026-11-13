@@ -47,7 +47,11 @@ function chainParse (rpcData, slotWidth) {
       bodyLen,
       body: rpcData.subarray(bodyStart, bodyStart + bodyLen),
       recordStart: offset,
-      bodyStart
+      bodyStart,
+      // offset of the bodyLen field within the record (for splicing a
+      // resized body back into the wire): slot framing puts it at +6,
+      // no-slot framing at +5.
+      lenOffset: offset + headerLen - 2
     })
     offset = bodyStart + bodyLen
   }

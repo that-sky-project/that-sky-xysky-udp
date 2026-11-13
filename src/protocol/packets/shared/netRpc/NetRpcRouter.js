@@ -33,7 +33,19 @@ export class NetRpcRouter {
       if (!typemap) continue
       const handler = typemap.get(record.flags) ?? typemap.get('*')
       if (!handler) continue
-      const newBody = handler(record, context)
+      let newBody
+      try {
+        newBody = handler(record, context)
+      } catch (error) {
+        // A failing handler must never take the whole NetRpc packet down —
+        // the record stays byte-identical and the caller relays it as-is.
+        context?.logger?.warn?.(
+          { classHash: record.classHash.toString(16), flags: record.flags,
+            bodyLen: record.bodyLen, err: error?.message ?? String(error) },
+          'netrpc handler failed; relaying record untouched'
+        )
+        continue
+      }
       if (newBody && Buffer.isBuffer(newBody) && !newBody.equals(record.body)) {
         patches.push({ record, newBody })
       }
@@ -47,7 +59,9 @@ export class NetRpcRouter {
       // everything before this record stays untouched
       parts.push(rpcData.subarray(cursor, record.recordStart))
       const header = Buffer.from(rpcData.subarray(record.recordStart, record.bodyStart))
-      header.writeUInt16LE(newBody.length, 6)
+      // the bodyLen field sits at record.lenOffset (6 with a slot byte, 5
+      // without — writing at a fixed 6 overran the no-slot header).
+      header.writeUInt16LE(newBody.length, record.lenOffset)
       parts.push(header, newBody)
       cursor = record.bodyStart + record.bodyLen
     }
@@ -59,14 +73,14 @@ export class NetRpcRouter {
 export function createNetRpcRouter () {
   const router = new NetRpcRouter()
 
-  // Gift: the wire flags byte is 0x00 on every captured gift packet — the
+  // Gift: the record flags byte is 0x00 on every captured gift packet — the
   // offer/accept/complete/cancel distinction lives inside the BODY at
   // body[2]. On accept the SERVER decides who receives the gift: inject the
   // accepting player's own uuid over whatever the client wrote
-  // (anti-forgery). Capture-verified: the receiver uuid sits at body offset
-  // 10, i.e. rpcData offset 18 — the same absolute offset the old
-  // flat-header code patched, which is why live gifts kept working even
-  // though the class match never fired on official traffic.
+  // (anti-forgery). Capture-verified: the signed receiver uuid sits at body
+  // offset 11 (7/7 official accepts v4-valid there, 0/7 at 10 and 12) — in
+  // no-slot framing the same bytes are rpcData[18..34], the offset the
+  // reference server patches.
   router.register(GIFT_CLASS_HASH, 0x00, (record, { source, logger }) => {
     if (record.body[2] !== GiftTypeFlag.Accept) return null
     const uuid = source?.uuid?.bytes
