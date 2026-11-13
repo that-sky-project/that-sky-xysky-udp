@@ -89,10 +89,8 @@ export class JoinService {
     const authority = this.levels.getAuthority(player.levelId);
     if (!authority) {
       this.levels.setAuthority(player.levelId, player, { reason: 'join_first_player' });
-    } else {
-      for (const handler of this.levels._authorityElectedHandlers) {
-        handler(player.levelId, authority, player);
-      }
+    } else if (player.levelReady) {
+      this.levels.syncAuthority(player.levelId, player);
     }
 
     this.logger.info({

@@ -15,6 +15,8 @@ export class LevelService {
     }
 
     const oldLevelId = player.levelId;
+    const oldGeneration = player.lvSeq;
+    const wasReady = player.levelReady;
     const changedLevel = oldLevelId !== payload.levelId;
     if (changedLevel) {
       this.levels.clearAuthorityPenalty?.(oldLevelId, player);
@@ -27,12 +29,12 @@ export class LevelService {
     }
 
     let authority = this.levels.getAuthority(player.levelId);
+    const generationChanged = player.lvSeq !== oldGeneration;
     if (!authority) {
       authority = this.rebalanceAuthority(player.levelId, 'level_update_no_authority').authority;
-    } else {
-      for (const handler of this.levels._authorityElectedHandlers) {
-        handler(player.levelId, authority, player);
-      }
+    }
+    if (authority && (!wasReady || changedLevel || generationChanged)) {
+      this.levels.syncAuthority(player.levelId, player);
     }
 
     if (!changedLevel) {

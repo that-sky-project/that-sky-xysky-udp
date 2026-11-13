@@ -101,8 +101,11 @@ export function createRoomApplication ({ config, logger, metrics, onFatalError }
   const authorityElectionGate = new AuthorityElectionGate()
   levels.onAuthorityElected((levelId, authority, targetPlayer) => {
     if (authorityElectionGate.isSuppressed(levelId)) return
-    const targets = targetPlayer ? [targetPlayer] : players.listActiveInLevel(levelId)
-    for (const player of targets) gameMessageService.sendElect(player, authority, levels.loadLevelData(levelId))
+    const targets = targetPlayer ? [targetPlayer] : players.listActiveInLevel(levelId).filter(player => player.levelReady)
+    for (const player of targets) {
+      gameMessageService.sendElect(player, authority, levels.loadLevelData(levelId))
+      player.lastAuthoritySync = `${levelId}:${player.lvSeq}:${authority.id}:${levels.getAuthorityVersion(levelId)}`
+    }
   })
   const dispatcher = new PacketDispatcher({ context: Object.freeze({
     joinService, levelService, gameMessageService, audienceService, moveService,

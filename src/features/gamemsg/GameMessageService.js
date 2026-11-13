@@ -306,10 +306,16 @@ export class GameMessageService {
         }, 'ignored level data for mismatched level');
         return;
       }
+      if (levelDataMsg.authorityVersion !== this.levels.getAuthorityVersion(source.levelId)) {
+        this.warn({ playerId: source.id, levelId: source.levelId,
+          receivedVersion: levelDataMsg.authorityVersion,
+          expectedVersion: this.levels.getAuthorityVersion(source.levelId) }, 'ignored level data with stale authority version');
+        return;
+      }
       const levelId = source.levelId;
       this.levels.saveLevelData(levelId, {
         mergeState: levelDataMsg.mergeState ?? 0,
-        unknown1: levelDataMsg.unknown1 ?? 0,
+        authorityVersion: levelDataMsg.authorityVersion,
         unknown2: levelDataMsg.unknown2 ?? 0,
         unknown3: levelDataMsg.unknown3 ?? 0,
         levelHash: levelDataMsg.levelHash ?? 0,
@@ -533,13 +539,17 @@ export class GameMessageService {
     }
 
     if (this.packetDebug?.isEnabled({ id: PacketIds.GameMsg, payload: { type: GameMsgType.NetLevelDataElect } })) {
+      const message = decodeNetLevelDataMsg(levelPayload);
       this.logger.debug({
         targetPlayerId: target.id,
         authorityPlayerId: authority?.id,
-        levelId: authority?.levelId,
-        electedPlayer: authority?.id,
-        hasInitialData: levelPayload?.hasInitialData,
-        levelDataLength: levelPayload?.levelData?.length ?? 0,
+        levelId: message.levelId,
+        electedPlayer: message.electedPlayer,
+        authorityVersion: message.authorityVersion,
+        hasInitialData: message.hasInitialData,
+        levelDataLength: message.levelData.length,
+        messageBytes: levelPayload.length,
+        compressedBytes: frame.payload.length,
         frameSeq: frame.sequence,
         frameBase: frame.base
       }, 'sending NetLevelDataElect');
@@ -598,6 +608,7 @@ export class GameMessageService {
       const outgoing = encodeNetLevelDataMsg({
         ...levelData,
         electedPlayer: authority.id,
+        authorityVersion: (this.levels.getAuthorityVersion(levelId) + 1) & 0xffff,
         levelId,
         hasInitialData: (levelData.payload?.length ?? 0) > 0,
         levelData: levelData.payload ?? Buffer.alloc(0)
@@ -804,6 +815,7 @@ export class GameMessageService {
     return encodeNetLevelDataMsg({
       ...(cached ?? {}),
       electedPlayer: authority.id,
+      authorityVersion: this.levels.getAuthorityVersion(authority.levelId),
       levelId: authority.levelId,
       hasInitialData: payload.length > 0,
       levelData: payload

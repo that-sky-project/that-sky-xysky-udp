@@ -5,6 +5,7 @@ export class LevelStateStore {
     this.roomId = roomId;
     this.logger = logger;
     this.authorities = new Map();
+    this.authorityVersions = new Map();
     this.penalizedAuthorityCandidates = new Map();
     /** levelId -> the authority's serialized level state. */
     this.levelData = new Map();
@@ -19,6 +20,23 @@ export class LevelStateStore {
     return this.authorities.get(levelId);
   }
 
+  getAuthorityVersion(levelId) {
+    return this.authorityVersions.get(levelId) ?? 0;
+  }
+
+  syncAuthority(levelId, targetPlayer) {
+    const authority = this.getAuthority(levelId);
+    if (!authority || !targetPlayer.levelReady || targetPlayer.levelId !== levelId) return false;
+    const authorityVersion = this.getAuthorityVersion(levelId);
+    const identity = `${levelId}:${targetPlayer.lvSeq}:${authority.id}:${authorityVersion}`;
+    if (targetPlayer.lastAuthoritySync === identity) return false;
+    for (const handler of this._authorityElectedHandlers) {
+      handler(levelId, authority, targetPlayer);
+    }
+    targetPlayer.lastAuthoritySync = identity;
+    return true;
+  }
+
   setAuthority(levelId, player, context = {}) {
     if (!player || (player.levelId !== undefined && player.levelId !== levelId)) {
       throw new StateError('authority player is not in level', {
@@ -31,10 +49,16 @@ export class LevelStateStore {
     this.authorities.set(levelId, player);
 
     if (previous !== player) {
+      // New elections advance the u16 authority epoch; recipient resyncs do not.
+      const version = (this.getAuthorityVersion(levelId) + 2) & 0xffff;
+      this.authorityVersions.set(levelId, version);
+      const cached = this.levelData.get(levelId);
+      if (cached) cached.authorityVersion = version;
       this.logger?.info({
         roomId: this.roomId,
         levelId,
         authorityPlayerId: player.id,
+        authorityVersion: version,
         previousAuthorityPlayerId: context.previousAuthorityPlayerId ?? previous?.id,
         peerId: player.session?.peerId?.toString(),
         uuid: player.uuid?.toString(),
@@ -104,10 +128,19 @@ export class LevelStateStore {
   saveLevelData(levelId, data) {
     const authority = this.getAuthority(levelId);
     const payload = Buffer.from(data.payload ?? Buffer.alloc(0));
+    const authorityVersion = data.authorityVersion ?? this.getAuthorityVersion(levelId);
+    if (!Number.isInteger(authorityVersion) || authorityVersion < 0 || authorityVersion > 0xffff) {
+      throw new StateError('invalid level authority version', { levelId, authorityVersion });
+    }
+    if (authority && authorityVersion !== this.getAuthorityVersion(levelId)) {
+      throw new StateError('stale level authority version', { levelId, authorityVersion,
+        expectedVersion: this.getAuthorityVersion(levelId) });
+    }
+    this.authorityVersions.set(levelId, authorityVersion);
     this.levelData.set(levelId, {
       electedPlayer: authority?.id ?? data.authorityPlayerId ?? 0,
+      authorityVersion,
       mergeState: data.mergeState ?? 0,
-      unknown1: data.unknown1 ?? 0,
       unknown2: data.unknown2 ?? 0,
       unknown3: data.unknown3 ?? 0,
       levelHash: data.levelHash ?? data.unknown4 ?? 0,
@@ -128,12 +161,14 @@ export class LevelStateStore {
   reset(levelId, context = {}) {
     if (levelId === undefined) {
       this.authorities.clear();
+      this.authorityVersions.clear();
       this.penalizedAuthorityCandidates.clear();
       this.levelData.clear();
       return;
     }
 
     this.revokeAuthority(levelId, context);
+    this.authorityVersions.delete(levelId);
     this.penalizedAuthorityCandidates.delete(levelId);
     this.levelData.delete(levelId);
   }
@@ -141,6 +176,7 @@ export class LevelStateStore {
   toApi() {
     return Array.from(new Set([
       ...this.authorities.keys(),
+      ...this.authorityVersions.keys(),
       ...this.penalizedAuthorityCandidates.keys(),
       ...this.levelData.keys()
     ])).map(levelId => {
@@ -149,6 +185,7 @@ export class LevelStateStore {
         roomId: this.roomId,
         levelId,
         authorityPlayerId: this.authorities.get(levelId)?.id,
+        authorityVersion: this.getAuthorityVersion(levelId),
         penalizedAuthorityPlayerIds: Array.from(this.penalizedAuthorityCandidates.get(levelId) ?? [], player => player.id),
         hasLevelData: Boolean(state),
         levelDataBytes: state?.payload?.length ?? 0,

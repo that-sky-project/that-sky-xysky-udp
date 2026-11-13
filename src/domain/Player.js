@@ -9,6 +9,8 @@ export class Player {
     this.netVersion = netVersion;
     this.lvSeq = Number.isFinite(levelChangeCount) ? (Math.trunc(levelChangeCount) & 0xff) : 0;
     this.levelChangeCount = this.lvSeq;
+    this.levelReady = false;
+    this.lastAuthoritySync = undefined;
     this.joinedAt = Date.now();
     this.lastSeenAt = Date.now();
     this.playerDelta = new PlayerSnapshotState();
@@ -20,11 +22,18 @@ export class Player {
   }
 
   changeLevel(levelId, netVersion = this.netVersion, levelChangeCount = undefined) {
+    const previousLevelId = this.levelId;
+    const previousGeneration = this.lvSeq;
+    const wasReady = this.levelReady;
     this.levelId = levelId;
     this.lvSeq = Number.isFinite(levelChangeCount)
       ? (Math.trunc(levelChangeCount) & 0xff)
       : ((this.lvSeq + 1) & 0xff);
     this.levelChangeCount = this.lvSeq;
+    this.levelReady = true;
+    if (!wasReady || previousLevelId !== this.levelId || previousGeneration !== this.lvSeq) {
+      this.lastAuthoritySync = undefined;
+    }
     this.netVersion = netVersion;
     this.touch();
   }
@@ -37,6 +46,7 @@ export class Player {
       peerId: this.session.peerId.toString(),
       levelId: this.levelId,
       levelChangeCount: this.levelChangeCount,
+      levelReady: this.levelReady,
       netVersion: this.netVersion?.values,
       levelHash: this.netVersion?.levelHash,
       joinedAt: this.joinedAt,
