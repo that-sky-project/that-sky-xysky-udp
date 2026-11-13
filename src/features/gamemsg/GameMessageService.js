@@ -329,16 +329,16 @@ export class GameMessageService {
       });
 
       const signature = `${levelId}:${decoded.data.length}:${levelDataMsg.levelData?.length ?? 0}`;
-      if (signature !== this.lastStoredLevelSignature) {
-        this.lastStoredLevelSignature = signature;
-        this.logger.debug({
-          playerId: source.id,
-          levelId,
-          packetLevelId: levelDataMsg.levelId,
-          dataBytes: decoded.data.length,
-          levelDataBytes: levelDataMsg.levelData?.length ?? 0
-        }, 'stored level data for tick sync');
-      }
+      // if (signature !== this.lastStoredLevelSignature) {
+      //   this.lastStoredLevelSignature = signature;
+      //   this.logger.debug({
+      //     playerId: source.id,
+      //     levelId,
+      //     packetLevelId: levelDataMsg.levelId,
+      //     dataBytes: decoded.data.length,
+      //     levelDataBytes: levelDataMsg.levelData?.length ?? 0
+      //   }, 'stored level data for tick sync');
+      // }
       return;
     }
 
