@@ -24,7 +24,7 @@
         },
         "pretty": {
           "description": "Human-readable logs using pino-pretty; false emits structured JSON.",
-          "default": false,
+          "default": true,
           "type": "boolean"
         }
       },

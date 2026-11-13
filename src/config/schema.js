@@ -39,7 +39,7 @@ const qwdUrl = z.string().trim().superRefine((value, ctx) => {
 
 export const loggingSchema = z.strictObject({
   level: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info').describe('Pino minimum log level. Packet diagnostics require debug or trace.'),
-  pretty: z.boolean().default(false).describe('Human-readable logs using pino-pretty; false emits structured JSON.')
+  pretty: z.boolean().default(true).describe('Human-readable logs using pino-pretty; false emits structured JSON.')
 }).describe('Logging settings. No environment-variable overrides.');
 
 export const roomSchema = z.strictObject({

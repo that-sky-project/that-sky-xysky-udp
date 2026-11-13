@@ -200,7 +200,7 @@ Built-in defaults (not the checked-in deployment):
 ```yaml
 logging:
   level: info             # pino level; use "debug" for protocol diagnostics
-  pretty: false           # human-readable logs
+  pretty: true           # human-readable logs
 
 room:
   host: 0.0.0.0           # ENet UDP bind address

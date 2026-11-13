@@ -160,7 +160,7 @@ YAML 错误包含文件路径与行列，schema 错误包含字段路径。房�
 | YAML 配置项 | 默认值 | CLI / 校验 |
 | --- | --- | --- |
 | `logging.level` | `info` | `--log-level`：fatal/error/warn/info/debug/trace/silent |
-| `logging.pretty` | `false` | `--pretty` / `--no-pretty` |
+| `logging.pretty` | `true` | `--pretty` / `--no-pretty` |
 | `room.host` | `0.0.0.0` | `--host`：监听 hostname/IP |
 | `room.port` | `19132` | `--port`：整数 1–65535 |
 | `room.public_uri` | `127.0.0.1:19132` | `--public-uri`：客户端可达 UDP 端点 |
