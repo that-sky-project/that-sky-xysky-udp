@@ -100,28 +100,55 @@ export function decodePlayerState(buffer, { maxBytes = PLAYER_STATE_MAX_BYTES, m
   const candidates = layout ? LAYOUTS.filter((entry) => entry.id === layout) : (ordered ?? LAYOUTS);
   let lastError;
   for (const candidate of candidates) {
-    const io = new NativeIo(new BinaryReader(rawState), { mode, idTable, layout: candidate });
-    try {
-      const fields = playerState(io);
-      // A correct layout consumes the record to the last byte; anything left
-      // over means the variant guessed a different field set and drifted.
-      if (io.reader.remainingBits > 7) {
-        const trailing = new ProtocolError('PlayerState layout left trailing data', {
-          layout: candidate.id,
-          remainingBits: io.reader.remainingBits
-        });
-        trailing.consumedBits = io.bits;
-        if (!lastError || trailing.consumedBits >= (lastError.consumedBits ?? 0)) lastError = trailing;
-        continue;
+    // Within-width bound auto-repair: a bounded/sbounded value that fits its
+    // own wire width can never be a schema gap — the client's writer accepted
+    // it — so widen the model bound to the full width and retry. The width is
+    // unchanged, so alignment and everything after the field are untouched.
+    // Chain pollution still fails structurally (underflow/trailing), which is
+    // the intended fail-closed behavior.
+    const boundOverrides = new Map();
+    const widened = [];
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const io = new NativeIo(new BinaryReader(rawState), { mode, idTable, layout: candidate, boundOverrides });
+      try {
+        const fields = playerState(io);
+        // A correct layout consumes the record to the last byte; anything left
+        // over means the variant guessed a different field set and drifted.
+        if (io.reader.remainingBits > 7) {
+          const trailing = new ProtocolError('PlayerState layout left trailing data', {
+            layout: candidate.id,
+            remainingBits: io.reader.remainingBits
+          });
+          trailing.consumedBits = io.bits;
+          if (!lastError || trailing.consumedBits >= (lastError.consumedBits ?? 0)) lastError = trailing;
+          break;
+        }
+        return { version: VERSION, layout: candidate.id, rawState, fields, complete: true, parsed: true,
+          bits: io.bits, mode: io.mode,
+          ...(widened.length ? { boundWidened: widened } : {}),
+          _originalFields: structuredClone(fields) };
+      } catch (error) {
+        // Surface the attempt that got furthest: the last candidate's error is
+        // arbitrary — it names the drift point of a doomed variant, while the
+        // furthest walk points at the real schema gap.
+        error.consumedBits = io.bits;
+        if (!lastError || error.consumedBits >= (lastError.consumedBits ?? 0)) lastError = error;
+        const d = error.details ?? {};
+        if (attempt < 7 && typeof d.encoded === 'number' && Number.isSafeInteger(d.min) &&
+          Number.isSafeInteger(d.max) && d.min < d.max && d.encoded >= d.min) {
+          const width = Math.ceil(Math.log2(d.max - d.min + 1));
+          const rawMax = d.min + 2 ** width - 1;
+          if (rawMax > d.max) {
+            const key = d.bitOffset !== undefined ? `${d.operation}:${d.bitOffset}` : `r${d.min}:${d.max}`;
+            if (!boundOverrides.has(key)) {
+              boundOverrides.set(key, rawMax);
+              widened.push({ key, min: d.min, max: d.max, encoded: d.encoded, rawMax });
+              continue;
+            }
+          }
+        }
+        break;
       }
-      return { version: VERSION, layout: candidate.id, rawState, fields, complete: true, parsed: true,
-        bits: io.bits, mode: io.mode, _originalFields: structuredClone(fields) };
-    } catch (error) {
-      // Surface the attempt that got furthest: the last candidate's error is
-      // arbitrary — it names the drift point of a doomed variant, while the
-      // furthest walk points at the real schema gap.
-      error.consumedBits = io.bits;
-      if (!lastError || error.consumedBits >= (lastError.consumedBits ?? 0)) lastError = error;
     }
   }
   throw lastError ?? new ProtocolError('PlayerState could not be decoded');
@@ -178,11 +205,17 @@ export function encodePlayerState(state, { maxBytes = PLAYER_STATE_MAX_BYTES, pr
 }
 
 class NativeIo {
-  constructor(stream, { mode = 2, idTable = null, layout = DEFAULT_LAYOUT } = {}) {
+  constructor(stream, { mode = 2, idTable = null, layout = DEFAULT_LAYOUT, boundOverrides = null } = {}) {
     this.reader = stream instanceof BinaryReader ? stream : null;
     this.writer = stream instanceof BinaryWriter ? stream : null;
     this.scopeName = 'PlayerState';
     this.operation = 0;
+    // Retry-time bound repairs from decodePlayerState: rawMax keyed by
+    // `${operation}:${bitOffset}` (bounded) or `r${min}:${max}` (sbounded).
+    // Every wire value fits its own field width, so widening a model bound to
+    // the full width is bit-alignment-safe and can never reject a value the
+    // client's own writer accepted.
+    this.boundOverrides = boundOverrides;
     // Serialization mode for dynamic id fields (see dynU8).
     this.mode = [1, 2, 3].includes(mode) ? mode : 2;
     // Mode 2 needs the id<->slot table that the native side keeps on the
@@ -199,11 +232,12 @@ class NativeIo {
   u64(v = 0n) { return this.reader ? this.reader.readUInt64() : (this.writer.writeUInt64(v), BigInt(v)); }
   f32(v = 0) { return this.reader ? this.reader.readFloat() : (this.writer.writeFloat(v), v); }
   bounded(v, min, max, field) {
-    const x = v ?? min;
     const bitOffset = this.bits;
     this.operation += 1;
+    const override = this.boundOverrides?.get(`${this.operation}:${bitOffset}`);
+    const x = v ?? min;
     try {
-      return this.reader ? this.reader.readBounded(min, max) : (this.writer.writeBounded(x, min, max), x);
+      return this.reader ? this.reader.readBounded(min, override ?? max) : (this.writer.writeBounded(x, min, max), x);
     } catch (error) {
       error.details = {
         ...error.details,
@@ -221,9 +255,12 @@ class NativeIo {
     const x = v ?? min;
     const offset = 0x80000000;
     const raw = this.reader ? null : ((x + offset) >>> 0);
-    return this.reader
-      ? (this.reader.readBounded(min + offset, max + offset) - offset)
-      : (this.setSBounded(raw, min, max, field), x);
+    if (this.reader) {
+      const rawMin = min + offset, rawMax = max + offset;
+      const override = this.boundOverrides?.get(`r${rawMin}:${rawMax}`);
+      return this.reader.readBounded(rawMin, override ?? rawMax) - offset;
+    }
+    return (this.setSBounded(raw, min, max, field), x);
   }
   setSBounded(raw, min, max, field) {
     const bitOffset = this.bits;

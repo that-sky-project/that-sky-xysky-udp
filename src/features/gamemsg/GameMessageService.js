@@ -54,8 +54,18 @@ export class GameMessageService {
       const lite = decodePlayerStateLite(data, { layout });
       lite.degraded = true;
       lite.decodeError = error;
+      // Field-level detail (field/min/max/encoded/bitOffset) is what makes the
+      // next occurrence actionable: widen the named bound, redeploy, converge.
+      // The full hex dumps once per distinct failure signature so the exact
+      // state can be replayed offline against the capture oracles.
+      const details = error.details ?? undefined;
+      const signature = `${details?.field ?? details?.scope ?? 'unknown'}@${details?.bitOffset ?? '?'}:${error.consumedBits ?? '?'}:${data.length}`;
+      const shouldDump = !this.decodeDumpSignatures.has(signature) && this.decodeDumpSignatures.size < 8;
+      if (shouldDump) this.decodeDumpSignatures.add(signature);
       this.logger.debug?.({ playerId: player?.uuid?.toString?.(), layout,
-        consumedBits: error.consumedBits, err: error.message }, 'player state full decode failed; degraded to head read');
+        consumedBits: error.consumedBits, details, signature,
+        stateBytes: data.length, stateHex: shouldDump ? data.toString('hex') : undefined,
+        err: error.message }, 'player state full decode failed; degraded to head read');
       return lite;
     }
   }
@@ -241,7 +251,13 @@ export class GameMessageService {
       let parsed = false;
       try {
         source.playerDelta.decodedState = this.decodeState(source, decoded.data);
-        if (source.playerDelta.decodedState.complete) source.lastStateLayout = source.playerDelta.decodedState.layout;
+        if (source.playerDelta.decodedState.complete) {
+          source.lastStateLayout = source.playerDelta.decodedState.layout;
+          if (source.playerDelta.decodedState.boundWidened?.length) {
+            this.logger.debug?.({ playerId: source.id, widened: source.playerDelta.decodedState.boundWidened },
+              'player state decoded with within-width bound widening');
+          }
+        }
         parsed = true;
       } catch (error) {
         source.playerDelta.decodedState = partialPlayerState(decoded.data);
