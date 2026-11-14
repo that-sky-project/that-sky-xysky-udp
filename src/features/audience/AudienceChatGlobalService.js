@@ -1,6 +1,5 @@
 import { performance as monotonicClock } from 'node:perf_hooks'
 import { isDeepStrictEqual } from 'node:util'
-import { isAudienceLevel } from './AudienceLevels.js'
 import { ErrorCode } from '../../qwd/errorCodes.js'
 
 const MAX_RETIRED_EPOCHS = 16
@@ -11,7 +10,7 @@ export function validAudienceChatGlobalState (data) {
   if (!data || typeof data.authorityEpoch !== 'string' || !data.authorityEpoch ||
     data.authorityEpoch.length > 256 || data.authorityEpoch.trim() !== data.authorityEpoch ||
     !Number.isSafeInteger(data.revision) || data.revision < 0 ||
-    !Number.isSafeInteger(data.levelId) || !isAudienceLevel(data.levelId) ||
+    !Number.isSafeInteger(data.levelId) || data.levelId <= 0 ||
     typeof data.enabled !== 'boolean' ||
     !safeTime(data.remainingSeconds) || !safeTime(data.serverNowMs) ||
     !safeTime(data.expiresAtMs)) return false

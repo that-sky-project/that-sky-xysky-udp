@@ -13,7 +13,6 @@ import {
 import { audienceRequestPayloads } from '../../protocol/packets/client/AudienceRequests.js'
 import { TgcUuid } from '../../protocol/types/TgcUuid.js'
 import { BinaryReader } from '../../protocol/binary/BinaryReader.js'
-import { isAudienceLevel } from './AudienceLevels.js'
 import { AudienceSocial } from './AudienceSocial.js'
 import { profileF0Of } from './AudienceFrames.js'
 import { identityHashOfPlayerId } from '../../protocol/identityHash.js'
@@ -77,13 +76,8 @@ export class AudienceService {
     levelTime,
     entity = {}
   }) {
-    if (!isAudienceLevel(levelId)) {
-      this.logger.info(
-        { playerId, levelId, benchId, seatId },
-        'seatPlayer refused: level does not run the audience system'
-      )
-      return null
-    }
+    // Fully trusts QWD: seat.assign arrives only for levels the manager
+    // configured as seated venues.
     this.logger.info(
       { playerId, levelId, benchId, seatId, position, levelTime },
       'seatPlayer'
@@ -127,11 +121,10 @@ export class AudienceService {
     return { entityIdx, memberIndices }
   }
   #isSeatedInVenue (playerId, roster) {
-    if (!isAudienceLevel(roster.levelId)) return false
     if (typeof this.currentLevelOf !== 'function') return true
     const liveLevel = this.currentLevelOf(playerId)
     if (liveLevel === undefined || liveLevel === null) return false
-    return liveLevel === roster.levelId && isAudienceLevel(liveLevel)
+    return liveLevel === roster.levelId
   }
   forgetPlayer (playerId) {
     const session = this.liveBroadcastService?.sessionOf(playerId)
@@ -140,13 +133,6 @@ export class AudienceService {
     this.rosters.delete(playerId)
   }
   applyRemoteSnapshot (levelId, seats, { full = false } = {}) {
-    if (!isAudienceLevel(levelId)) {
-      this.logger.debug?.(
-        { levelId, seats: seats.length },
-        'remote snapshot ignored: level without audience'
-      )
-      return 0
-    }
     const now = Date.now() / 1000
     let applied = 0
     const localBenches = this.#localBenches()

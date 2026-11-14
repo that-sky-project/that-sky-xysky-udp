@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { performance as monotonicClock } from 'node:perf_hooks'
 import { isDeepStrictEqual } from 'node:util'
-import { isAudienceLevel } from './AudienceLevels.js'
 import { identityHashOfPlayerId } from '../../protocol/identityHash.js'
 import { ErrorCode } from '../../qwd/errorCodes.js'
 
@@ -21,7 +20,7 @@ const EVENT_TTL_MS = 3000
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && value.trim() === value
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
 const time = value => Number.isSafeInteger(value) && value >= 0
-const level = value => Number.isInteger(value) && isAudienceLevel(value)
+const level = value => Number.isInteger(value) && value > 0
 const canonicalIds = ids => [...new Set(ids.map(value => value.toLowerCase()))].sort()
 const identity = data => { const { serverNowMs, ...rest } = data; return rest }
 

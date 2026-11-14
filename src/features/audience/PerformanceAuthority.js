@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { performance as monotonicClock } from 'node:perf_hooks'
 import { isDeepStrictEqual } from 'node:util'
-import { isAudienceLevel } from './AudienceLevels.js'
 
 const MAX_PENDING = 64
 const MAX_BUFFERED = 128
@@ -14,7 +13,7 @@ export function validPerformanceState (state) {
   const phase = (value, id) => value && text(value[id]) && text(value.performerId) &&
     time(value.startedAtMs) && time(value.expiresAtMs) && time(value.durationMs) && value.durationMs > 0 &&
     value.expiresAtMs - value.startedAtMs === value.durationMs && value.startedAtMs <= state.serverNowMs
-  if (!state || !text(state.authorityEpoch) || !isAudienceLevel(state.levelId) ||
+  if (!state || !text(state.authorityEpoch) ||
     !Number.isSafeInteger(state.revision) || state.revision < 0 || !time(state.serverNowMs) ||
     !Array.isArray(state.queue) || state.queue.length > 10000 ||
     !state.queue.every(entry => entry && text(entry.playerId) && time(entry.enqueuedAtMs) && entry.enqueuedAtMs <= state.serverNowMs) ||
@@ -70,7 +69,7 @@ export class PerformanceAuthority {
     const player = session?.player
     const playerId = player?.uuid?.toString?.()
     return Boolean(playerId && this.sessionOf(playerId) === session && !session.closed && session.isActive?.() &&
-      player.levelId === levelId && isAudienceLevel(levelId) &&
+      player.levelId === levelId &&
       Number.isInteger(generation) && generation === player.lvSeq &&
       this.audience.rosters.get(playerId)?.levelId === levelId)
   }
@@ -99,7 +98,7 @@ export class PerformanceAuthority {
   sync (force = false) {
     if (!force && this.clock() - this.lastSyncAt < 2000) return false
     const sent = this.send('performance.sync', {
-      levelIds: [...new Set(this.levels().filter(isAudienceLevel))],
+      levelIds: [...new Set(this.levels())],
       ...(this.authorityEpoch ? { authorityEpoch: this.authorityEpoch } : {}),
       eventCursors: Object.fromEntries(this.cursors)
     })
@@ -328,7 +327,7 @@ export class PerformanceAuthority {
   }
 
   async gap (data) {
-    if (!data || data.authorityEpoch !== this.authorityEpoch || !isAudienceLevel(data.levelId) ||
+    if (!data || data.authorityEpoch !== this.authorityEpoch ||
       !Number.isSafeInteger(data.oldestAvailableSeq) || data.oldestAvailableSeq < 1 ||
       !['epoch_changed', 'cursor_ahead', 'journal_gap', 'session_ended'].includes(data.reason)) throw new Error('invalid performance gap')
     const state = this.states.get(data.levelId)

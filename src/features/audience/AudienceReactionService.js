@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { performance as monotonicClock } from 'node:perf_hooks'
 import { identityHashOfPlayerId } from '../../protocol/identityHash.js'
-import { isAudienceLevel } from './AudienceLevels.js'
 import { ErrorCode } from '../../qwd/errorCodes.js'
 
 const validReaction = reaction => Boolean(reaction && Number.isInteger(reaction.flag7) && reaction.flag7 >= 0 && reaction.flag7 <= 7 &&
@@ -97,7 +96,7 @@ export class AudienceReactionService {
     this.tick()
     const authority = this.authority()
     if (!data || typeof data.eventId !== 'string' || !data.eventId || data.eventId.length > 256 ||
-      typeof data.playerId !== 'string' || !data.playerId || !isAudienceLevel(data.levelId) || !validReaction(data.reaction) ||
+      typeof data.playerId !== 'string' || !data.playerId || !Number.isInteger(data.levelId) || !validReaction(data.reaction) ||
       !Number.isSafeInteger(data.eventSeq) || data.eventSeq < 1 || !Number.isFinite(data.serverNowMs) ||
       !Number.isFinite(data.expiresAtMs) || data.expiresAtMs < data.serverNowMs) return this.ack(data, false, 'invalid')
     if (!authority?.available || !this.epoch || data.authorityEpoch !== this.epoch || !authority.offsets.has(data.levelId)) {
