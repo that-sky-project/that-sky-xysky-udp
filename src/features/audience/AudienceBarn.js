@@ -100,6 +100,18 @@ export class AudienceBarn {
     ...entity
   }) {
     const index = this.entityForSeat(eventId, benchId, seatId)
+    // One entity per player: re-assignment (seat move, manager restart
+    // rebuild, remote snapshot relocation) must retire the previous entity,
+    // otherwise the stale seat keeps rendering as a badminton-bird silhouette
+    // that follows the player — feedLocalPositions and getEntityForPlayer
+    // resolve owners by first map match, so the ghost would keep receiving
+    // live positions forever.
+    for (const [owned, owner] of this.occupants) {
+      if (owner !== playerId || owned === index) continue
+      this.entities.delete(owned)
+      this.occupants.delete(owned)
+      this.dirtyEntities.delete(owned)
+    }
     const existing = this.entities.get(index)
     const next = {
       ...existing,

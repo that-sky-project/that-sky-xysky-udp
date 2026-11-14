@@ -52,7 +52,8 @@ export function createRoomApplication ({ config, logger, metrics, onFatalError }
   const publish = (event, data) => qwd.publish(event, data)
   const reservations = new RoomReservations({ players, identity, publish })
   const migrationRosters = new MigrationRosters({ players, reservations, logger })
-  const telemetry = new QwdTelemetry({ players, publishTelemetry: (...args) => qwd.publishTelemetry(...args) })
+  const telemetry = new QwdTelemetry({ players, publishTelemetry: (...args) => qwd.publishTelemetry(...args),
+    seatOf: playerId => audienceService?.rosters.get(playerId) })
   const sessionOf = playerId => players.getByUuid(playerId)?.session ?? null
   const audienceCodec = new AudienceCodec()
   const audienceService = new AudienceService({
