@@ -89,6 +89,41 @@ test('expired roster rebuild reuses already live UUID net IDs', () => {
   assert.notEqual(a.id, b.id)
 })
 
+test('native companion-only join rosters include self internally and reuse reciprocal arrivals', () => {
+  const f = fixture()
+  const a = f.join('a', { moving: true, move: { players: [uuid('b')] } })
+  const first = f.sent.at(-1).packet.payload.players
+  assert.equal(first.length, 2)
+  assert.equal(first.find(entry => entry.uuid.toString() === 'a').netId, a.id)
+  const reservedB = first.find(entry => entry.uuid.toString() === 'b').netId
+  assert.equal(f.reservations.reservedSlots(), 1)
+  const b = f.join('b', { moving: true, move: { players: [uuid('a')] } })
+  assert.equal(b.id, reservedB)
+  assert.equal(f.players.size, 2)
+  assert.equal(f.migration.size, 0)
+  assert.equal(f.reservations.reservedSlots(), 0)
+})
+
+test('seven companions plus self fit eight room slots without widening the wire roster bound', () => {
+  const f = fixture()
+  const group = Array.from({ length: 8 }, (_, index) => `member-${index}`)
+  const first = f.join(group[0], { moving: true, move: { players: group.slice(1).map(uuid) } })
+  const advertised = new Map(f.sent.at(-1).packet.payload.players.map(entry => [entry.uuid.toString(), entry.netId]))
+  assert.equal(advertised.size, 8)
+  assert.equal(advertised.get(group[0]), first.id)
+  for (const name of group.slice(1)) {
+    const current = f.join(name, { moving: true, move: { players: group.filter(other => other !== name).map(uuid) } })
+    assert.equal(current.id, advertised.get(name))
+  }
+  assert.equal(f.players.size, 8)
+  assert.equal(f.reservations.reservedSlots(), 0)
+  assert.equal(f.migration.size, 0)
+  const invalid = fixture()
+  assert.throws(() => invalid.join('a', { moving: true, move: { players: [uuid('b'), uuid('b')] } }), /invalid migration roster/)
+  assert.throws(() => invalid.join('a', { moving: true, move: { players: group.map(uuid) } }), /invalid migration roster/)
+  assert.equal(invalid.players.size, 0)
+})
+
 test('all-member move preflight refuses silent subset dragging and negative sends', () => {
   const f = fixture(); const a = f.join('a'); const b = f.join('b'); b.session.transition(ConnectionState.MOVING)
   const before = f.sent.length

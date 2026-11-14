@@ -14,12 +14,17 @@ export class MigrationRosters {
   claim (session, payload) {
     if (!Array.isArray(payload.move?.players) || payload.move.players.length === 0) return undefined
     const ownUuid = payload.uuid?.toString?.()
-    const uuids = payload.move.players.map(uuid => uuid?.toString?.())
-    if (!ownUuid || !uuids.includes(ownUuid) || uuids.some(uuid => !uuid) || new Set(uuids).size !== uuids.length || uuids.length > 7) {
+    const wireUuids = payload.move.players.map(uuid => uuid?.toString?.())
+    if (!ownUuid || wireUuids.some(uuid => !uuid) || new Set(wireUuids).size !== wireUuids.length || wireUuids.length > 7) {
       throw new ProtocolError('invalid migration roster')
     }
     const reservationId = this.reservations.findByPlayer(ownUuid)
     if (!payload.moving && !reservationId) return undefined
+    // Native JoinGame may list companions only. Normalize self exactly once;
+    // seven wire companions plus the joining player still obey room capacity 8.
+    const identities = new Map([[ownUuid, payload.uuid]])
+    payload.move.players.forEach((uuid, index) => identities.set(wireUuids[index], uuid))
+    const uuids = [...identities.keys()]
     const key = `move:${uuids.slice().sort().join(',')}`
     let roster = this.#rosters.get(key)
     if (!roster) {
@@ -31,7 +36,7 @@ export class MigrationRosters {
         for (const uuid of uuids) {
           const live = this.players.getByUuid(uuid)
           const netId = live?.id ?? this.players.reserveId(this.players.allocateId())
-          entries.push({ netId, uuid: payload.move.players.find(item => item.toString() === uuid), levelId: live?.levelId ?? payload.levelId ?? 0 })
+          entries.push({ netId, uuid: identities.get(uuid), levelId: live?.levelId ?? payload.levelId ?? 0 })
         }
       } catch (error) {
         for (const entry of entries) this.players.releaseReservedId(entry.netId)
