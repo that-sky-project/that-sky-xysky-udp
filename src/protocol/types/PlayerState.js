@@ -367,7 +367,9 @@ function playerState(io, v = {}) {
   // The remaining question is only what that array/those offsets mean.
   o.offset_5198 = io.qf(v.offset_5198, 0, 50, 0, 8);
   // Signed 32-bit bounded -1..32 (sub_140038A20 flips the sign bit).
-  o.offset_52c0 = io.sbounded(v.offset_52c0, -1, 32);
+  // Widened -1..32 -> -1..62 (2026-11-14): live traffic on level 3526133726
+  // carries 46. Both ranges span 64 values (6 bits), alignment unchanged.
+  o.offset_52c0 = io.sbounded(v.offset_52c0, -1, 62);
   o.offset_52c4 = io.u16(v.offset_52c4);
   o.offset_52cc = io.u8(v.offset_52cc);
   o.offset_52ce = io.u8(v.offset_52ce);
@@ -392,7 +394,9 @@ function playerState(io, v = {}) {
   // state+0x5b5c / 0x5b60 are signed bounded (-1..16 and -1..8). 5b60 widened
   // to -1..14 (2026-11-14): live 0.35.1 traffic carries 11 past the observed
   // 8; both ends keep the 4-bit width (16 values), so alignment is unchanged.
-  o.offset_5b5c = io.sbounded(v.offset_5b5c, -1, 0x10);
+  // Widened -1..16 -> -1..30 (2026-11-14): live traffic carries 23 past the
+  // observed bound (the deployed build capped at 17). Both ranges are 5 bits.
+  o.offset_5b5c = io.sbounded(v.offset_5b5c, -1, 30);
   o.offset_5b60 = io.sbounded(v.offset_5b60, -1, 0xe);
   // state+0x5baa bool, then 0x58a0 bool and six raw pose vec3s (0x58b0..0x5900).
   o.offset_5baa = io.bool(v.offset_5baa);
