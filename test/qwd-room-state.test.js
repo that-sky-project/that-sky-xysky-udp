@@ -101,7 +101,7 @@ test('migration rosters reserve unique IDs and release them on expiry and shutdo
   assert.equal(rosters.size, 0);
 });
 
-test('completed migration roster releases matching reservation only after everyone joins', () => {
+test('roster cleanup preserves reservation conversion ownership until all arrivals are consumed', () => {
   const players = new PlayerStore({ maxPlayers: 8 });
   const { reservations } = reservationFixture(players);
   reservations.create('move', ['a', 'b']);
@@ -112,5 +112,9 @@ test('completed migration roster releases matching reservation only after everyo
   assert.equal(rosters.size, 1);
   roster.joined.add('b'); rosters.complete(roster);
   assert.equal(rosters.size, 0);
+  assert.equal(reservations.size, 1, 'roster cleanup must not remove the reservation before arrival conversion');
+  reservations.consume('a');
+  assert.equal(reservations.reservedSlots(), 1);
+  reservations.consume('b');
   assert.equal(reservations.size, 0);
 });

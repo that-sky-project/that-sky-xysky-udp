@@ -1,302 +1,146 @@
 import { ErrorCode, fail, ok } from '../qwd/errorCodes.js'
+import { ALLOCATION_RESERVATION_TTL_MS } from '../qwd/RoomReservations.js'
 import { TgcUuid } from '../protocol/types/TgcUuid.js'
 import { destinationUuid } from './destinationUuid.js'
-const seatAssign = {
-  validate (data) {
-    const playerId = String(data?.playerId ?? '')
-    const benchId = Number(data?.benchId)
-    const seatId = Number(data?.seatId)
-    if (!playerId || !Number.isInteger(benchId) || !Number.isInteger(seatId)) {
-      return fail(ErrorCode.BAD_REQUEST, 'invalid seat assignment')
-    }
-    return undefined
-  },
-  async handle (command, context) {
-    const data = command.data ?? {}
-    const playerId = String(data.playerId ?? '')
-    const benchId = Number(data.benchId)
-    const seatId = Number(data.seatId)
-    const levelId = Number(data.levelId) || 0
-    const roomMembers =
-      Array.isArray(data.roomMembers) && data.roomMembers.length > 0
-        ? data.roomMembers
-            .map(member => ({
-              benchId: Number(member?.benchId),
-              seatId: Number(member?.seatId)
-            }))
-            .filter(
-              member =>
-                Number.isInteger(member.benchId) &&
-                Number.isInteger(member.seatId)
-            )
-        : undefined
-    const player = context.players.getByUuid(playerId)
-    const position = player?.playerDelta?.decodedState?.fields?.position
-    const levelTime = Date.now() / 1000
-    const assigned = await context.audienceService.seatPlayer({
-      playerId,
-      levelId,
-      benchId,
-      seatId,
-      roomMembers,
-      position,
-      levelTime
-    })
-    if (!assigned) {
-      return ok({ accepted: false, reason: 'level_without_audience' })
-    }
-    context.qwd.publish('seat.occupied', {
-      roomId: context.identity.id,
-      player: { playerId },
-      levelId,
-      benchId,
-      seatId,
-      entityId: assigned.entityIdx,
-      position,
-      levelTime
-    })
-    return ok({ accepted: true, entityId: assigned.entityIdx })
-  }
+
+const validLease = data => data?.ttlMs === undefined || (Number.isInteger(data.ttlMs) && data.ttlMs > 0 && data.ttlMs <= 120_000)
+const validToken = data => data?.reservationToken === undefined || (typeof data.reservationToken === 'string' && data.reservationToken.length > 0 && data.reservationToken.length <= 256)
+const roomMatches = (data, context) => data?.roomId === undefined || String(data.roomId) === String(context.identity.id)
+const facts = context => context.reservations.facts(context.telemetry.version)
+const ack = (context, reservationId, extra = {}) => {
+  const reservation = context.reservations.get(reservationId)
+  return ok({ accepted: true, reservationId, reservationToken: reservation?.reservationToken,
+    expiresAt: reservation?.expiresAt, ...facts(context), ...extra })
 }
-const audienceSnapshot = {
-  async handle (command, context) {
-    const data = command.data ?? {}
-    const levelId = Number(data.levelId) || 0
-    const seats = Array.isArray(data.seats) ? data.seats : []
-    const removed = Array.isArray(data.removed) ? data.removed.map(String) : []
-    for (const playerId of removed) {
-      if (context.audienceService.rosters.has(playerId)) continue
-      context.audienceService.barn.forgetPlayer(playerId)
-    }
-    const full = data.full === true
-    const applied = context.audienceService.applyRemoteSnapshot(levelId, seats, {
-      full
-    })
-    // Seating snapshots never establish performance authority. Only the
-    // versioned performance.state/decision/deliver commands may do that.
-    return ok({ accepted: true, applied, removed: removed.length })
-  }
+const reservationValidation = (data, context) => {
+  if (!validLease(data) || !validToken(data) || !roomMatches(data, context)) return fail(ErrorCode.BAD_REQUEST, 'invalid reservation identity or lease')
 }
-const seatRelease = {
-  validate (data) {
-    if (!String(data?.playerId ?? ''))
-      return fail(ErrorCode.BAD_REQUEST, 'invalid seat release')
-    return undefined
-  },
-  handle (command, context) {
-    const playerId = String(command.data?.playerId ?? '')
-    const roster = context.audienceService.rosters.get(playerId)
-    context.audienceService.forgetPlayer(playerId)
-    context.qwd.publish('seat.released', {
-      roomId: context.identity.id,
-      player: { playerId },
-      levelId: roster?.levelId ?? 0,
-      benchId: roster?.benchId,
-      seatId: roster?.seatId
-    })
-    return ok({ accepted: true })
-  }
-}
+
 const roomReserve = {
   validate (data, context) {
-    const roomId = String(data?.roomId ?? '')
-    const playerId = String(data?.playerId ?? '')
-    if (!roomId || roomId !== String(context.identity.id) || !playerId) {
-      return fail(ErrorCode.BAD_REQUEST, 'invalid room reservation')
-    }
-    return undefined
+    return reservationValidation(data, context) ??
+      (!data?.roomId || !String(data?.playerId ?? '') ? fail(ErrorCode.BAD_REQUEST, 'invalid room reservation') : undefined)
   },
   handle (command, context) {
-    const playerId = String(command.data?.playerId ?? '')
+    const data = command.data
+    const playerId = String(data.playerId)
     const existingId = context.reservations.findByPlayer(playerId)
     if (existingId) {
-      return ok({ accepted: true, reservationId: existingId, slots: 1 })
+      if (!context.reservations.matchesToken(existingId, data.reservationToken)) return fail(ErrorCode.CONFLICT, 'reservation owner conflicts')
+      context.reservations.renew(existingId, data.ttlMs ?? ALLOCATION_RESERVATION_TTL_MS)
+      return ack(context, existingId, { slots: 1, idempotent: true })
     }
-    if (!context.reservations.hasCapacity(1)) {
-      return fail(ErrorCode.NO_CAPACITY, 'room capacity reserved')
-    }
-    const reservationId = `allocation-${playerId}-${Date.now()}`
-    context.reservations.create(reservationId, [playerId], command.data?.ttlMs)
-    return ok({ accepted: true, reservationId, slots: 1 })
+    if (context.players.getByUuid(playerId)) return fail(ErrorCode.CONFLICT, 'player already physically present', facts(context))
+    if (!context.reservations.hasCapacity(1)) return fail(ErrorCode.NO_CAPACITY, 'room capacity reserved', facts(context))
+    const reservationId = data.moveId ? String(data.moveId) : `allocation-${playerId}-${Date.now()}`
+    if (context.reservations.get(reservationId)) return fail(ErrorCode.CONFLICT, 'reservation identity conflicts')
+    context.reservations.create(reservationId, [playerId], data.ttlMs ?? ALLOCATION_RESERVATION_TTL_MS, data)
+    return ack(context, reservationId, { slots: 1, moveId: data.moveId })
   }
 }
+
 const movePrepare = {
-  validate (data) {
-    const moveId = String(data?.moveId ?? '')
-    const playerIds = Array.isArray(data?.playerIds)
-      ? data.playerIds.map(String)
-      : []
-    if (
-      !moveId ||
-      !playerIds.length ||
-      new Set(playerIds).size !== playerIds.length
-    ) {
+  validate (data, context) {
+    const invalid = reservationValidation(data, context)
+    if (invalid) return invalid
+    if (!String(data?.moveId ?? '') || !Array.isArray(data?.playerIds) || !data.playerIds.length || data.playerIds.length > 7 ||
+      data.playerIds.some(id => !String(id ?? '')) || new Set(data.playerIds.map(String)).size !== data.playerIds.length ||
+      (data.expectedVersion !== undefined && (!Number.isInteger(data.expectedVersion) || data.expectedVersion < 0))) {
       return fail(ErrorCode.BAD_REQUEST, 'invalid move prepare')
     }
-    return undefined
   },
   handle (command, context) {
-    const data = command.data ?? {}
-    const moveId = String(data.moveId ?? '')
+    const data = command.data
+    const moveId = String(data.moveId)
     const playerIds = data.playerIds.map(String)
     const existing = context.reservations.get(moveId)
     if (existing) {
-      const same =
-        existing.playerIds.size === playerIds.length &&
-        playerIds.every(id => existing.playerIds.has(id))
-      if (!same) return fail(ErrorCode.CONFLICT, 'move reservation conflicts')
+      if (existing.playerIds.size !== playerIds.length || !playerIds.every(id => existing.playerIds.has(id)) ||
+        !context.reservations.matchesToken(moveId, data.reservationToken)) return fail(ErrorCode.CONFLICT, 'move reservation conflicts')
       context.reservations.renew(moveId, data.ttlMs)
-      return ok({
-        accepted: true,
-        moveId,
-        slots: playerIds.length,
-        idempotent: true,
-        version: context.telemetry.version
-      })
+      return ack(context, moveId, { moveId, slots: playerIds.length, idempotent: true })
     }
-    if (!context.reservations.hasCapacity(playerIds.length)) {
-      return fail(ErrorCode.NO_CAPACITY, 'room capacity reserved')
+    if (playerIds.some(id => context.reservations.findByPlayer(id) || context.players.getByUuid(id))) {
+      return fail(ErrorCode.CONFLICT, 'participant already present or reserved', facts(context))
     }
-    const expectedVersion = data?.expectedVersion
-    if (
-      typeof expectedVersion === 'number' &&
-      Number.isFinite(expectedVersion)
-    ) {
-      const currentVersion = context.telemetry.version
-      if (
-        expectedVersion < currentVersion &&
-        currentVersion - expectedVersion > 3
-      ) {
-        return fail(ErrorCode.STALE_PLAN, 'room state advanced past the plan', {
-          expectedVersion,
-          currentVersion,
-          players: context.players.size
-        })
-      }
+    if (!context.reservations.hasCapacity(playerIds.length)) return fail(ErrorCode.NO_CAPACITY, 'room capacity reserved', facts(context))
+    if (data.expectedVersion !== undefined && context.telemetry.version - data.expectedVersion > 3) {
+      return fail(ErrorCode.STALE_PLAN, 'room state advanced past the plan', { expectedVersion: data.expectedVersion, currentVersion: context.telemetry.version, ...facts(context) })
     }
-    context.reservations.create(moveId, playerIds, data.ttlMs)
-    return ok({
-      accepted: true,
-      moveId,
-      slots: playerIds.length,
-      version: context.telemetry.version
-    })
+    context.reservations.create(moveId, playerIds, data.ttlMs, data)
+    return ack(context, moveId, { moveId, slots: playerIds.length })
   }
 }
+
 const moveCancel = {
-  handle (command, context) {
-    context.reservations.cancel(String(command.data?.moveId ?? ''))
-    return ok()
-  }
-}
-const moveCommit = {
-  validate (data) {
-    if (!data?.udpHost)
-      return fail(ErrorCode.BAD_REQUEST, 'missing destination host')
-    return undefined
+  validate (data, context) {
+    return reservationValidation(data, context) ?? (!String(data?.moveId ?? '') ? fail(ErrorCode.BAD_REQUEST, 'missing move identity') : undefined)
   },
   handle (command, context) {
-    const data = command.data ?? {}
+    const data = command.data
+    const moveId = String(data.moveId)
+    if (context.reservations.get(moveId) && !context.reservations.matchesToken(moveId, data.reservationToken)) {
+      return fail(ErrorCode.CONFLICT, 'reservation owner conflicts')
+    }
+    context.reservations.cancel(moveId)
+    context.migrationRosters?.cancelReservation?.(moveId)
+    return ok({ accepted: true, moveId, reservationToken: data.reservationToken, ...facts(context) })
+  }
+}
+
+const moveCommit = {
+  validate (data, context) {
+    const ids = data?.playerIds ?? (data?.playerId ? [data.playerId] : [])
+    if (!roomMatches(data, context) || !validToken(data) || typeof data?.udpHost !== 'string' || !data.udpHost ||
+      !Number.isInteger(data.udpPort) || data.udpPort < 1 || data.udpPort > 65535 ||
+      !Array.isArray(ids) || !ids.length || ids.length > 7 || new Set(ids.map(String)).size !== ids.length) {
+      return fail(ErrorCode.BAD_REQUEST, 'invalid move destination or group')
+    }
+    if (data.expectedParticipants !== undefined && (!Array.isArray(data.expectedParticipants) ||
+      data.expectedParticipants.length !== ids.length || new Set(data.expectedParticipants.map(item => String(item?.playerId))).size !== ids.length ||
+      data.expectedParticipants.some(item => !item || !ids.map(String).includes(String(item.playerId)) || item.sessionId === undefined ||
+        !Number.isInteger(item.levelId) || !Number.isInteger(item.lvSeq) || item.lvSeq < 0 || item.lvSeq > 255))) {
+      return fail(ErrorCode.BAD_REQUEST, 'invalid expected participants')
+    }
+  },
+  handle (command, context) {
+    const data = command.data
     const ids = data.playerIds ?? [data.playerId]
     const group = []
     for (const id of ids) {
-      const player =
-        context.players.getByUuid(String(id)) ??
-        context.players.getById(Number(id))
-      if (!player)
-        return fail(ErrorCode.NOT_FOUND, 'source player not found', {
-          playerId: id
-        })
+      const player = context.players.getByUuid(String(id)) ?? context.players.getById(Number(id))
+      if (!player) return fail(ErrorCode.NOT_FOUND, 'source player not found', { playerId: id })
+      const expected = data.expectedParticipants?.find(item => String(item.playerId) === String(id))
+      if (expected && (String(expected.sessionId) !== String(player.session.id) || expected.levelId !== player.levelId || expected.lvSeq !== player.lvSeq)) {
+        return fail(ErrorCode.STALE_PLAN, 'source participant changed', { playerId: id, expected, actual: {
+          playerId: player.uuid.toString(), sessionId: player.session.id, levelId: player.levelId, lvSeq: player.lvSeq } })
+      }
       group.push(player)
     }
-    const toRoomUuid = TgcUuid.isText(data.toRoomUuid)
-      ? data.toRoomUuid
-      : destinationUuid(data.toRoomId)
-    if (!toRoomUuid) {
-      return fail(ErrorCode.BAD_REQUEST, 'invalid destination room uuid', {
-        toRoomId: data.toRoomId
-      })
-    }
-    const target = {
-      id: data.toRoomId,
-      udpHost: data.udpHost,
-      udpPort: data.udpPort,
-      uuid: toRoomUuid,
-      address: {
-        host: data.udpHost,
-        port: data.udpPort,
-        toApi () {
-          return { host: this.host, port: this.port }
-        }
-      }
-    }
-    const result = context.moveService.movePlayersAtomic(group, target, {
-      moveId: data.moveId
-    })
-    context.qwd.publish('move.result', {
-      roomId: context.identity.id,
-      moveId: data.moveId,
-      accepted: result.accepted,
-      reason: result.reason,
-      movedPlayerIds: result.movedPlayerIds ?? [],
-      failedPlayerIds: result.failedPlayerIds ?? []
-    })
-    return result.accepted
-      ? ok(result)
-      : { code: ErrorCode.CONFLICT, data: result }
+    const toRoomUuid = TgcUuid.isText(data.toRoomUuid) ? data.toRoomUuid : destinationUuid(data.toRoomId)
+    if (!toRoomUuid) return fail(ErrorCode.BAD_REQUEST, 'invalid destination room uuid', { toRoomId: data.toRoomId })
+    const target = { id: data.toRoomId, uuid: toRoomUuid,
+      address: { host: data.udpHost, port: data.udpPort, toApi () { return { host: this.host, port: this.port } } } }
+    const result = context.moveService.movePlayersAtomic(group, target, { moveId: data.moveId, reservationToken: data.reservationToken })
+    context.qwd.publish('move.result', { roomId: context.identity.id, moveId: data.moveId,
+      reservationToken: data.reservationToken, phase: 'source_commit', accepted: result.accepted, reason: result.reason,
+      movedPlayerIds: result.movedPlayerIds ?? [], failedPlayerIds: result.failedPlayerIds ?? [] })
+    return result.accepted ? ok(result) : { code: ErrorCode.CONFLICT, data: result }
   }
 }
-export const QWD_COMMANDS = new Map(
-  Object.entries({
-    'liveBroadcast.capability': { async handle (command, context) {
-      const live = context.liveBroadcastService
-      return live.enqueue(() => live.capability(command.data))
-    } },
-    'liveBroadcast.deliver': { async handle (command, context) {
-      const live = context.liveBroadcastService
-      return live.enqueue(() => live.deliver(command.data))
-    } },
-    'performance.state': { async handle (command, context) {
-      const authority = context.performanceAuthority
-      const applied = await authority.enqueue(() => authority.state(command.data))
-      const data = { authorityEpoch: command.data.authorityEpoch, revision: command.data.revision, applied }
-      return applied ? ok(data) : fail(ErrorCode.CONFLICT, 'stale performance state', data)
-    } },
-    'performance.decision': { async handle (command, context) {
-      const authority = context.performanceAuthority
-      await authority.enqueue(() => authority.decision(command.data)); return ok()
-    } },
-    'performance.deliver': { async handle (command, context) {
-      const authority = context.performanceAuthority
-      return ok(await authority.enqueue(() => authority.deliver(command.data)))
-    } },
-    'performance.gap': { async handle (command, context) {
-      const authority = context.performanceAuthority
-      const data = await authority.enqueue(() => authority.gap(command.data))
-      return data.applied ? ok(data) : fail(ErrorCode.CONFLICT, 'stale performance gap', data)
-    } },
-    'audience.reaction': { async handle (command, context) {
-      const reactions = context.audienceReactionService
-      return reactions.enqueue(() => reactions.apply(command.data))
-    } },
-    'audience.chatGlobal': { async handle (command, context) {
-      const chatGlobal = context.audienceChatGlobalService
-      return chatGlobal.enqueue(() => chatGlobal.apply(command.data))
-    } },
-    'seat.assign': seatAssign,
-    'audience.snapshot': audienceSnapshot,
-    'seat.release': seatRelease,
-    'room.reserve': roomReserve,
-    'move.prepare': movePrepare,
-    'move.cancel': moveCancel,
-    'move.commit': moveCommit,
-    'player.redirect': moveCommit
-  })
-)
+
+const roomSync = {
+  validate (data, context) { if (!roomMatches(data, context)) return fail(ErrorCode.BAD_REQUEST, 'room identity conflicts') },
+  handle (command, context) { context.telemetry.forceFull(); return ok(facts(context)) }
+}
+export const QWD_COMMANDS = new Map(Object.entries({
+  'room.reserve': roomReserve, 'room.sync': roomSync,
+  'move.prepare': movePrepare, 'move.renew': movePrepare, 'move.cancel': moveCancel,
+  'move.commit': moveCommit, 'player.redirect': moveCommit
+}))
 export function dispatchQwdCommand (command, context) {
   const commandType = QWD_COMMANDS.get(command?.cmd)
   if (!commandType) return fail(ErrorCode.BAD_REQUEST, 'unsupported command')
   const rejected = commandType.validate?.(command.data, context)
-  if (rejected) return rejected
-  return commandType.handle(command, context)
+  return rejected ?? commandType.handle(command, context)
 }

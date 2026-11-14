@@ -5,9 +5,6 @@ import { decodePlayerState } from '../../protocol/types/PlayerState.js';
 export class PlayerSnapshotState {
   constructor({ decodeFields = false, onResyncRequired } = {}) {
     this.decodeFields = decodeFields;
-    // Invoked when the outgoing window is past repair — the session layer
-    // answers with the id-5 SnapshotResync command (client resets both
-    // channels and demands a keyframe).
     this.onResyncRequired = onResyncRequired;
     this.resyncRequired = false;
     this.rawState = null;
@@ -37,11 +34,6 @@ export class PlayerSnapshotState {
     this.writer.onSync(status => {
       this.stats.lastWriteStatus = status;
       if (status === 'resyncfailed') {
-        // The outgoing window halved twice without an ack — no further delta
-        // can recover it. The session layer answers with the id-5
-        // SnapshotResync command; the client resets both channels and
-        // demands a keyframe (asm: sub_1A99E98 id-5 branch writes 0x0101 to
-        // state+0x2E3C0 and re-inits both Writer/Reader pairs).
         this.resyncRequired = true;
         this.onResyncRequired?.();
       }

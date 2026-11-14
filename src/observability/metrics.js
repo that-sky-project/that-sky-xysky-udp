@@ -30,6 +30,11 @@ export function createMetrics() {
     labelNames: ['reason']
   });
 
+  const admissionRejections = new client.Counter({
+    registers: [registry], name: 'xysky_admission_rejections_total',
+    help: 'Business admission rejections, separate from malformed packets', labelNames: ['reason']
+  });
+
   const packetErrors = new client.Counter({
     registers: [registry],
     name: 'xysky_packet_errors_total',

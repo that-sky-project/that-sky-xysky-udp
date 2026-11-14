@@ -1,8 +1,10 @@
 import { PacketIds } from '../../protocol/PacketIds.js';
 import { ConnectionState } from '../../connection/states.js';
+import { AdmissionError } from '../../errors.js';
+import { sendPacket } from '../broadcast/sendPacket.js';
 
 export class JoinService {
-  constructor({ players, levels, levelService, broadcaster, logger, metrics, migration, onPlayerJoined, onEvict }) {
+  constructor({ players, levels, levelService, broadcaster, logger, metrics, migration, reservations, onPlayerJoined, onEvict }) {
     this.players = players;
     this.levels = levels;
     this._levelService = levelService;
@@ -10,6 +12,7 @@ export class JoinService {
     this.logger = logger;
     this.metrics = metrics;
     this.migration = migration;
+    this.reservations = reservations ?? migration?.reservations;
     this.onPlayerJoined = onPlayerJoined;
     this.onEvict = onEvict;
   }
@@ -29,10 +32,19 @@ export class JoinService {
       return session.player;
     }
 
-    const migrationRoster = this.migration?.claim?.(session, payload) ?? undefined;
-    const playerId = migrationRoster?.entries.find(entry => entry.uuid.toString() === payload.uuid.toString())?.netId;
-
     const previous = this.players.getByUuid(payload.uuid.toString());
+    this.reservations?.expire();
+    const ownsSlot = this.reservations?.findByPlayer(payload.uuid.toString(), { outstandingOnly: true });
+    const replacementCredit = previous && previous.session !== session ? 1 : 0;
+    const required = ownsSlot ? 0 : 1;
+    const hasCapacity = this.reservations
+      ? this.reservations.hasCapacity(required, replacementCredit)
+      : this.players.size - replacementCredit < this.players.maxPlayers;
+    if (!hasCapacity) throw new AdmissionError();
+    const migrationRoster = this.migration?.claim?.(session, payload) ?? undefined;
+    // Reconnects and rebuilt rosters preserve a UUID's currently live native ID.
+    const playerId = previous?.id ?? migrationRoster?.entries.find(entry => entry.uuid.toString() === payload.uuid.toString())?.netId;
+
     if (previous && previous.session !== session) {
       this.evictSession(previous);
     }
@@ -48,7 +60,7 @@ export class JoinService {
         id: playerId
       });
     } catch (error) {
-      if (migrationRoster && playerId !== undefined) this.players.releaseReservedId(playerId);
+      this.migration?.rollback?.(migrationRoster, playerId);
       throw error;
     }
 
@@ -72,14 +84,16 @@ export class JoinService {
       }
     };
     try {
-      this.broadcaster.send(session, enterGame);
+      sendPacket(this.broadcaster, session, enterGame, undefined, 'EnterGame send failed to queue');
     } catch (error) {
       this.players.removeBySession(session);
+      this.migration?.rollback?.(migrationRoster, playerId);
       throw error;
     }
     session.attachPlayer(player);
     session.transition(ConnectionState.ACTIVE);
     migrationRoster?.joined?.add(payload.uuid.toString());
+    this.reservations?.consume(payload.uuid.toString());
     this.migration?.complete?.(migrationRoster);
     this.broadcaster.broadcast(enterGame, { playerOnly: true, exceptSession: session });
 

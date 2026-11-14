@@ -59,7 +59,7 @@ test('loopback ws proves real ping/pong, server-drop reconnect, full resync, ACK
   const epoch = qwd.connectionEpoch
   peers[0].terminate()
   await until(() => dropped === 1)
-  assert.equal(qwd.publish('performance.request', {}), false)
+  assert.equal(qwd.publish('player.join', {}), true)
   qwd.publishTelemetry([{ playerId: 'obsolete' }], 10)
   await until(() => connected === 2 && messages.filter(row => row.peer === peers[1]).length >= 2)
   assert.equal(qwd.socket, rw)

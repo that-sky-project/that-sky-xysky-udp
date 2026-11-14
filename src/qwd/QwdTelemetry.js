@@ -4,14 +4,9 @@ export const TELEMETRY_FULL_RESYNC_MS = 10_000
 export const TELEMETRY_PLAYER_KEEPALIVE_MS = 2_000
 
 export class QwdTelemetry {
-  constructor ({ players, publishTelemetry, seatOf = null, now = Date.now }) {
+  constructor ({ players, publishTelemetry, now = Date.now }) {
     this.players = players
     this.publishTelemetry = publishTelemetry
-    // Seat facts ride telemetry so the manager can rebuild its allocator after
-    // a restart with zero churn: the node's roster is the source of truth for
-    // who sits where, and re-deriving seats manager-side renumbered every
-    // bench and re-projected the whole hall.
-    this.seatOf = typeof seatOf === 'function' ? seatOf : null
     this.now = now
     this.seq = 0
     this.lastPublishedAt = -Infinity
@@ -39,13 +34,12 @@ export class QwdTelemetry {
     const players = active.map(player => {
       const fields = player.playerDelta.decodedState?.fields
       const playerId = player.uuid.toString()
-      const seat = this.seatOf?.(playerId)
       return {
         playerId,
+        sessionId: player.session?.id,
+        lvSeq: player.lvSeq,
+        status: 'ACTIVE',
         levelId: player.levelId,
-        ...(seat && Number.isInteger(seat.benchId) && Number.isInteger(seat.seatId)
-          ? { benchId: seat.benchId, seatId: seat.seatId }
-          : {}),
         position: fields?.position ? [...fields.position] : undefined,
         velocity: fields?.move?.velocity ? Math.hypot(...fields.move.velocity) : undefined,
         stateAt: player.playerDelta.stats.lastReadAt ?? player.lastSeenAt,
@@ -91,8 +85,7 @@ export class QwdTelemetry {
 }
 
 function sameTelemetry (a, b) {
-  if (a.levelId !== b.levelId || a.velocity !== b.velocity) return false
-  if (a.benchId !== b.benchId || a.seatId !== b.seatId) return false
+  if (a.sessionId !== b.sessionId || a.lvSeq !== b.lvSeq || a.status !== b.status || a.levelId !== b.levelId || a.velocity !== b.velocity) return false
   if (!a.position !== !b.position) return false
   if (a.position && b.position && a.position.some((value, index) => value !== b.position[index])) return false
   const keys = Object.keys(a.affinity ?? {})

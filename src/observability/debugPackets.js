@@ -1,9 +1,7 @@
 import { PacketIds } from '../protocol/PacketIds.js';
-import { AudiencePacketId } from '../protocol/types/Audience.js';
 import { GameMsgType } from '../protocol/packets/shared/GameMsgPacket.js';
 
 const PACKET_ID_NAMES = invertIds(PacketIds);
-const AUDIENCE_ID_NAMES = invertIds(AudiencePacketId);
 const GAME_MSG_TYPE_NAMES = invertIds(GameMsgType);
 
 function invertIds(source) {
@@ -26,12 +24,7 @@ export const PACKET_LOG_NAMES = Object.freeze([
   'MusicSync',
   'Metrics',
   'NetLevelElectionNominee',
-  'AudienceHint',
-  'AudienceSocialBroadcast',
-  'AudienceConsensusVote',
-  'AudienceChat',
   'LevelStateSideChannel',
-  'AudienceSpotlightRequest',
   'JoinGame',
   'EnterGame',
   'LevelUpdate',
@@ -43,18 +36,7 @@ export const PACKET_LOG_NAMES = Object.freeze([
   'PlayerLeft',
   'PlayerChangeLevel',
   'NetTimePing',
-  'NetTimePong',
-  'Audience',
-  'AudienceRoomIds',
-  'AudienceReliableData',
-  'SocialBroadcastDown',
-  'AudienceConsensus',
-  'AudienceChatDownReliable',
-  'AudienceChatDownUnreliable',
-  'AudienceStreamInfo',
-  'AudienceSpotlightResponse',
-  'AudienceFeatureFlags',
-  'PresenceMatches'
+  'NetTimePong'
 ]);
 
 export const NOISY_PACKET_NAMES = Object.freeze([
@@ -87,7 +69,6 @@ export function packetLogName(packet) {
   if (id === PacketIds.GameMsg) {
     return GAME_MSG_TYPE_NAMES.get(packet.payload?.type) ?? `GameMsg/${packet.payload?.type}`;
   }
-  if (AUDIENCE_ID_NAMES.has(id)) return AUDIENCE_ID_NAMES.get(id);
   return PACKET_ID_NAMES.get(id) ?? (id === undefined ? null : `Packet${id}`);
 }
 
@@ -204,7 +185,7 @@ export class PacketDebugLog {
    * Log through a named channel if its switch is on.
    *
    * Used for the streams that are one lens over many packets rather than a
-   * single packet — the manager's command feed, seat movement.
+   * single packet — for example, the manager's command feed.
    *
    * @returns {boolean} whether the line was emitted
    */

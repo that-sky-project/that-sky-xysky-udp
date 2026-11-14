@@ -6,6 +6,14 @@ export class ProtocolError extends Error {
   }
 }
 
+export class AdmissionError extends Error {
+  constructor(message = 'room capacity reserved') {
+    super(message);
+    this.name = 'AdmissionError';
+    this.code = 'NO_CAPACITY';
+  }
+}
+
 export class StateError extends Error {
   constructor(message, details = undefined) {
     super(message);

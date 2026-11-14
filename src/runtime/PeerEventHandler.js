@@ -1,9 +1,10 @@
 import { PacketIds } from '../protocol/PacketIds.js';
 import { ConnectionState } from '../connection/states.js';
 import { PacketDebugLog, PacketFormatter } from '../observability/debugPackets.js';
+import { AdmissionError } from '../errors.js';
 
 export class PeerEventHandler {
-  constructor({ config, sessions, codec, dispatcher, players, levelService, moveService, audienceService, broadcaster, transport, metrics, logger, packetDebug, onPlayerLeft }) {
+  constructor({ config, sessions, codec, dispatcher, players, levelService, moveService, broadcaster, transport, metrics, logger, packetDebug, onPlayerLeft, finalizeSession }) {
     this.config = config;
     this.sessions = sessions;
     this.codec = codec;
@@ -11,13 +12,14 @@ export class PeerEventHandler {
     this.players = players;
     this.levelService = levelService;
     this.moveService = moveService;
-    this.audienceService = audienceService;
     this.broadcaster = broadcaster;
     this.transport = transport;
     this.metrics = metrics;
     this.logger = logger;
     this.packetDebug = packetDebug ?? new PacketDebugLog({ logger });
     this.onPlayerLeft = onPlayerLeft;
+    this.finalizeSession = finalizeSession;
+    this.lastWarningAt = -Infinity;
     this.inboundCounts = new Map();
   }
 
@@ -35,7 +37,7 @@ export class PeerEventHandler {
 
   onConnect(peerId) {
     if (this.sessions.get(peerId)) {
-      this.logger.warn({ peerId: peerId.toString() }, 'ignored duplicate peer connect event');
+      this._warn({ peerId: peerId.toString() }, 'ignored duplicate peer connect event');
       return;
     }
     if (this.sessions.size >= this.config.maxPeers) {
@@ -69,7 +71,7 @@ export class PeerEventHandler {
       packet = this.codec.decodeClient(data);
     } catch (error) {
       this._rejectSessionPacket(session, error.name ?? 'decode_error');
-      this.logger.warn({
+      this._warn({
         err: error,
         peerId: peerId.toString(),
         sessionId: session.id,
@@ -92,7 +94,7 @@ export class PeerEventHandler {
       session.connMagic = packet.token;
     } else if (packet.token !== session.connMagic) {
       this._rejectSessionPacket(session, 'magic_mismatch');
-      this.logger.warn({
+      this._warn({
         peerId: peerId.toString(),
         sessionId: session.id,
         expected: session.connMagic,
@@ -108,8 +110,17 @@ export class PeerEventHandler {
     try {
       this.dispatcher.dispatch(session, packet);
     } catch (error) {
+      if (error instanceof AdmissionError) {
+        this.metrics.admissionRejections?.inc({ reason: 'capacity' });
+        if (this.finalizeSession) this.finalizeSession(session, 'capacity_rejected', { disconnect: 'now' });
+        else {
+          this.sessions.remove(session.peerId, session);
+          this.transport.disconnect(session.peerId, 'now');
+        }
+        return;
+      }
       this._rejectSessionPacket(session, error.name ?? 'dispatch_error');
-      this.logger.warn({
+      this._warn({
         err: error,
         peerId: peerId.toString(),
         sessionId: session.id,
@@ -121,8 +132,11 @@ export class PeerEventHandler {
     }
   }
 
-  onDisconnect(peerId, data) {
-    const session = this.sessions.remove(peerId);
+  onDisconnect(peerId, data, expectedSession) {
+    const current = this.sessions.get(peerId);
+    if (expectedSession && current !== expectedSession) return;
+    if (this.finalizeSession) return this.finalizeSession(current, 'peer_disconnected');
+    const session = this.sessions.remove(peerId, expectedSession);
     if (!session) {
       return;
     }
@@ -132,7 +146,6 @@ export class PeerEventHandler {
       this.onPlayerLeft?.(player);
       this.moveService?.forgetPlayerMoves(player);
       this.levelService.releaseAuthority(player);
-      this.audienceService?.forgetPlayer(player.uuid?.toString?.());
       this.broadcaster.broadcast({
         id: PacketIds.PlayerLeft,
         payload: { playerId: player.id, reason: 0 }
@@ -170,14 +183,24 @@ export class PeerEventHandler {
     }, 'client packet raw');
   }
 
+  _warn(fields, message) {
+    const now = Date.now();
+    if (now - this.lastWarningAt < 1000) return;
+    this.lastWarningAt = now;
+    this.logger.warn(fields, message);
+  }
+
   _rejectSessionPacket(session, reason) {
     const count = session.registerBadPacket();
     this.metrics.packetErrors.inc({ reason });
 
     if (count >= this.config.badPacketLimit) {
-      session.close();
-      this.metrics.disconnects.inc({ reason: 'bad_packet_limit' });
-      this.transport.disconnect(session.peerId, 'later');
+      if (this.finalizeSession) this.finalizeSession(session, 'bad_packet_limit', { disconnect: 'now' });
+      else {
+        session.close();
+        this.metrics.disconnects.inc({ reason: 'bad_packet_limit' });
+        this.transport.disconnect(session.peerId, 'later');
+      }
     }
   }
 }

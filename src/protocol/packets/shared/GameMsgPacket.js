@@ -18,12 +18,7 @@ export const GameMsgType = Object.freeze({
   MusicSync: 15,
   Metrics: 16,
   NetLevelElectionNominee: 17,
-  AudienceHint: 19,
-  AudienceSocialBroadcast: 20,
-  AudienceConsensusVote: 21,
-  AudienceChat: 22,
-  LevelStateSideChannel: 23,
-  AudienceSpotlightRequest: 24
+  LevelStateSideChannel: 23
 })
 function readSnapshotPayload (reader) {
   return {

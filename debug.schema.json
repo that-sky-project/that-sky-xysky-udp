@@ -60,28 +60,8 @@
           "description": "Enable debug logging for NetLevelElectionNominee. Omitted switches are disabled.",
           "type": "boolean"
         },
-        "AudienceHint": {
-          "description": "Enable debug logging for AudienceHint. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceSocialBroadcast": {
-          "description": "Enable debug logging for AudienceSocialBroadcast. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceConsensusVote": {
-          "description": "Enable debug logging for AudienceConsensusVote. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceChat": {
-          "description": "Enable debug logging for AudienceChat. Omitted switches are disabled.",
-          "type": "boolean"
-        },
         "LevelStateSideChannel": {
           "description": "Enable debug logging for LevelStateSideChannel. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceSpotlightRequest": {
-          "description": "Enable debug logging for AudienceSpotlightRequest. Omitted switches are disabled.",
           "type": "boolean"
         },
         "JoinGame": {
@@ -130,50 +110,6 @@
         },
         "NetTimePong": {
           "description": "Enable debug logging for NetTimePong. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "Audience": {
-          "description": "Enable debug logging for Audience. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceRoomIds": {
-          "description": "Enable debug logging for AudienceRoomIds. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceReliableData": {
-          "description": "Enable debug logging for AudienceReliableData. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "SocialBroadcastDown": {
-          "description": "Enable debug logging for SocialBroadcastDown. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceConsensus": {
-          "description": "Enable debug logging for AudienceConsensus. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceChatDownReliable": {
-          "description": "Enable debug logging for AudienceChatDownReliable. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceChatDownUnreliable": {
-          "description": "Enable debug logging for AudienceChatDownUnreliable. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceStreamInfo": {
-          "description": "Enable debug logging for AudienceStreamInfo. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceSpotlightResponse": {
-          "description": "Enable debug logging for AudienceSpotlightResponse. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "AudienceFeatureFlags": {
-          "description": "Enable debug logging for AudienceFeatureFlags. Omitted switches are disabled.",
-          "type": "boolean"
-        },
-        "PresenceMatches": {
-          "description": "Enable debug logging for PresenceMatches. Omitted switches are disabled.",
           "type": "boolean"
         }
       },

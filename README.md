@@ -246,12 +246,14 @@ telemetry, reservations and migration rosters have separate owners. ENet listens
 QWD registration. `reconnecting-websocket` owns backoff/reconnect and a public `ws`
 adapter handles native send callbacks and heartbeat. `processLifecycle.js` stops
 registered resources in reverse order, reports cleanup failures and flushes logging;
-a 10-second deadline or second signal forces exit. Async commands/tick lanes are drained
+a 10-second deadline or second signal forces exit. Async commands are drained
 before state cleanup, and the native listen loop ends before host destruction.
 
 Packet handlers, codecs and feature services remain separate from main-program lifecycle
-wiring. The audience/authority cycle has one explicit construction-time attachment.
+wiring. Only ordinary room allocation, migration and game synchronization are constructed.
 Use `npm test`, `npm run check` and `npm run schema` for verification.
+
+
 
 ## Connection state machine
 

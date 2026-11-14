@@ -178,12 +178,7 @@ export class QwdClient {
 
   publish (event, data) {
     const message = JSON.stringify({ v: 1, event, data })
-    const control = event.startsWith('performance.') || event.startsWith('liveBroadcast.') || event === 'audience.reaction'
     const online = this.connected && this.socket?.readyState === OPEN
-    if (control && !online) {
-      this.logger.warn?.({ event }, 'QWD control send rejected: offline')
-      return false
-    }
     if (online && this.socket.bufferedAmount + Buffer.byteLength(message) > this.backpressureLimitBytes) {
       this.logger.warn?.({ event }, 'QWD send rejected: backpressure')
       return false
@@ -251,7 +246,9 @@ export class QwdClient {
     const state = this.snapshot?.() ?? {}
     const capacity = state.capacity ?? this.room.maxPeers ?? 8
     const players = state.players ?? 0
-    return { capacity, load: capacity > 0 ? Math.min(1, players / capacity) : 0 }
+    return { capacity, physicalPlayers: state.physicalPlayers ?? players,
+      activePlayers: state.activePlayers ?? players, reservedSlots: state.reservedSlots ?? 0,
+      version: state.version ?? 0, load: capacity > 0 ? Math.min(1, (state.physicalPlayers ?? players) / capacity) : 0 }
   }
 
   announceRoom () {

@@ -20,8 +20,9 @@ export class ConnectionManager {
     return this.sessions.get(peerId);
   }
 
-  remove(peerId) {
+  remove(peerId, expectedSession) {
     const session = this.sessions.get(peerId);
+    if (expectedSession && session !== expectedSession) return undefined;
     if (session) {
       session.close();
       this.sessions.delete(peerId);

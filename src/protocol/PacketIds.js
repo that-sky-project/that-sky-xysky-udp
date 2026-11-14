@@ -14,17 +14,5 @@ export const PacketIds = Object.freeze({
   NetTimePing: 12,
   NetTimePong: 13,
   GameMsg: 14,
-  EnterGame: 17,
-
-  Audience: 18,
-  AudienceRoomIds: 22,
-  AudienceReliableData: 23,
-  SocialBroadcastDown: 24,
-  AudienceConsensus: 25,
-  AudienceChatDownReliable: 26,
-  AudienceChatDownUnreliable: 27,
-  AudienceStreamInfo: 28,
-  AudienceSpotlightResponse: 29,
-  AudienceFeatureFlags: 32,
-  PresenceMatches: 33
+  EnterGame: 17
 });

@@ -214,11 +214,13 @@ YAML 编辑器可使用 `# yaml-language-server: $schema=./config.schema.json` �
 仅协调一次性生命周期。房间身份、遥测、预留槽位和迁移名单分别管理；ENet 监听成功后才注册 QWD。
 重连/退避交给 reconnecting-websocket，公开 ws 适配器负责原生 send 回调和心跳。
 `processLifecycle.js` 按逆序停止资源、记录清理失败并刷新日志；10 秒超时或第二次信号强制退出。
-关闭时先停止调度并排空命令/tick 工作，再清理状态；原生监听循环结束后才销毁 ENet host。
+关闭时先停止调度并排空命令，再清理状态；原生监听循环结束后才销毁 ENet host。
 
 数据包处理器、codec 和 feature service 与主程序生命周期装配保持分离；
-Audience/Performance 双向依赖保留一个显式构造期绑定。
+仅装配普通房间分配、迁移和游戏同步服务。
 验证命令：`npm test`、`npm run check`、`npm run schema`。
+
+
 
 ## 连接状态机
 

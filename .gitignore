@@ -11,18 +11,6 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
-# Keep local capture fixtures ignored; retain main-chain regression tests.
+# Keep local capture fixtures ignored; retain all regression tests.
 test/*
-!test/config-cli.test.js
-!test/config-schema.test.js
-!test/documentation.test.js
-!test/main-smoke.test.js
-!test/metrics-server.test.js
-!test/process-lifecycle.test.js
-!test/qwd-client.test.js
-!test/qwd-client-integration.test.js
-!test/qwd-room-state.test.js
-!test/runtime-lifecycle.test.js
-!test/performance-authority.test.js
-!test/performance-preparation.test.js
-!test/live-broadcast.test.js
+!test/*.test.js

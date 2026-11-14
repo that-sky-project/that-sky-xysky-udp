@@ -1,4 +1,6 @@
 import { PacketIds } from '../../protocol/PacketIds.js';
+import { activePlayers, activePlayersInLevel } from '../../domain/playerQueries.js';
+import { selectAuthorityCandidate } from '../../domain/authorityCandidates.js';
 
 export class LevelService {
   constructor({ players, levels, broadcaster, logger }) {
@@ -15,6 +17,13 @@ export class LevelService {
     }
 
     const oldLevelId = player.levelId;
+    const incomingGeneration = Number.isFinite(payload.levelChangeCount) ? (Math.trunc(payload.levelChangeCount) & 0xff) : undefined;
+    if (incomingGeneration !== undefined) {
+      const advance = (incomingGeneration - player.lvSeq + 256) & 0xff;
+      // Half-range u8 serial arithmetic: 255 -> 0 is new, 0 -> 255 is stale.
+      // Equal generation may initialize a joined level, never change its identity.
+      if (advance >= 128 || (advance === 0 && oldLevelId !== payload.levelId)) return false;
+    }
     const oldGeneration = player.lvSeq;
     const wasReady = player.levelReady;
     const changedLevel = oldLevelId !== payload.levelId;
@@ -87,11 +96,7 @@ export class LevelService {
     }
 
     const previousAuthorityPlayerId = current?.id;
-    let next = players.find(player => !this.levels.isAuthorityCandidatePenalized?.(levelId, player));
-    if (!next && players.length === 1) {
-      next = players[0];
-      this.levels.clearAuthorityPenalty?.(levelId, next);
-    }
+    const next = selectAuthorityCandidate(this.levels, levelId, players);
     if (next) {
       this.levels.setAuthority(levelId, next, {
         previousAuthorityPlayerId,
@@ -107,17 +112,11 @@ export class LevelService {
   }
 
   _activeInLevel(levelId) {
-    return typeof this.players.listActiveInLevel === 'function'
-      ? this.players.listActiveInLevel(levelId)
-      : this.players.listInLevel(levelId).filter(player => player.session?.isActive?.() ?? true);
+    return activePlayersInLevel(this.players, levelId);
   }
 
   _activePlayers() {
-    if (typeof this.players.listActive === 'function') return this.players.listActive();
-    if (typeof this.players.list === 'function') {
-      return this.players.list().filter(player => player.session?.isActive?.() ?? true);
-    }
-    return [];
+    return activePlayers(this.players);
   }
 
 }

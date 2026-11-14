@@ -32,7 +32,7 @@ export class RpcTap {
   }
 
   /**
-   * @param {object} entry - already shaped by GameMessageService
+   * @param {object} entry - already shaped by RpcRelay
    */
   push(entry) {
     if (!this.enabled) return;

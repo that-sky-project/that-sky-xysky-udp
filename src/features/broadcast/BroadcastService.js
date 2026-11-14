@@ -19,13 +19,7 @@ export class BroadcastService {
 
   broadcast(packet, { exceptSession, playerOnly = true, channel = 0, reliable = true } = {}) {
     this._iterateSessions({ exceptSession, playerOnly }, session => {
-      const buffer = this.codec.encodeServer(packet, session);
-      this.metrics?.packetBytes?.inc({ direction: 'server' }, buffer.length);
-      this.packetDebug?.log('s2c', packet, {
-        peerId: session.peerId?.toString?.(),
-        sessionId: session.id
-      });
-      this.transport.send(session.peerId, buffer, { channel, reliable });
+      this.send(session, packet, { channel, reliable });
     });
   }
 

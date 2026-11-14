@@ -1,5 +1,4 @@
 import { PacketCodec } from '../protocol/PacketCodec.js'
-import { AudienceCodec } from '../protocol/AudienceCodec.js'
 import { ConnectionManager } from '../connection/ConnectionManager.js'
 import { PacketDispatcher } from '../connection/PacketDispatcher.js'
 import { registerAllHandlers } from '../connection/handlers/index.js'
@@ -12,11 +11,6 @@ import { JoinService } from '../features/join/JoinService.js'
 import { LevelService } from '../features/level/LevelService.js'
 import { GameMessageService } from '../features/gamemsg/GameMessageService.js'
 import { MoveService } from '../features/move/MoveService.js'
-import { AudienceService } from '../features/audience/AudienceService.js'
-import { PerformanceAuthority } from '../features/audience/PerformanceAuthority.js'
-import { AudienceReactionService } from '../features/audience/AudienceReactionService.js'
-import { AudienceChatGlobalService } from '../features/audience/AudienceChatGlobalService.js'
-import { IndependentLiveBroadcastService } from '../features/audience/LiveBroadcastService.js'
 import { QwdClient } from '../qwd/QwdClient.js'
 import { RoomIdentity } from '../qwd/RoomIdentity.js'
 import { QwdTelemetry } from '../qwd/QwdTelemetry.js'
@@ -29,7 +23,6 @@ import { RoomTick } from './RoomTick.js'
 import { RoomServer } from './RoomServer.js'
 import { AuthorityElectionGate } from './AuthorityElectionCoordinator.js'
 import { dispatchQwdCommand } from './QwdCommands.js'
-import { attachPerformanceAuthority, createAudienceSender } from './audiencePorts.js'
 import { createPlayerLifecycle } from './playerLifecycle.js'
 
 const ROOM_CAPACITY = 8
@@ -52,36 +45,15 @@ export function createRoomApplication ({ config, logger, metrics, onFatalError }
   const publish = (event, data) => qwd.publish(event, data)
   const reservations = new RoomReservations({ players, identity, publish })
   const migrationRosters = new MigrationRosters({ players, reservations, logger })
-  const telemetry = new QwdTelemetry({ players, publishTelemetry: (...args) => qwd.publishTelemetry(...args),
-    seatOf: playerId => audienceService?.rosters.get(playerId) })
-  const sessionOf = playerId => players.getByUuid(playerId)?.session ?? null
-  const audienceCodec = new AudienceCodec()
-  const audienceService = new AudienceService({
-    logger, packetDebug,
-    currentLevelOf: playerId => players.getByUuid(playerId)?.levelId,
-    barnClock: () => Date.now() / 1000,
-    sendToClient: createAudienceSender({ players, transport, codec: audienceCodec, packetDebug }),
-    onPositionChanged: (playerId, roster, position, levelTime) => publish('seat.occupied', {
-      roomId: identity.id, player: { playerId }, levelId: roster.levelId ?? 0,
-      benchId: roster.benchId, seatId: roster.seatId, position, levelTime
-    })
-  })
-  const authorityPorts = {
-    audience: audienceService, publish, roomId: () => identity.id, sessionOf,
-    levels: () => players.listActive().map(player => player.levelId), logger
-  }
-  const performanceAuthority = new PerformanceAuthority(authorityPorts)
-  attachPerformanceAuthority(audienceService, performanceAuthority)
-  const liveBroadcastService = new IndependentLiveBroadcastService(authorityPorts)
-  const audienceReactionService = new AudienceReactionService(authorityPorts)
-  const audienceChatGlobalService = new AudienceChatGlobalService({ audience: audienceService, logger })
+  const telemetry = new QwdTelemetry({ players, publishTelemetry: (...args) => qwd.publishTelemetry(...args) })
   const moveService = new MoveService({
     players, rooms, broadcaster, transport, levelService, logger,
     moveTimeoutMs: room.moveTimeoutMs,
     onMoveResult: (move, accepted) => {
       if (!move.transactionId) return
       publish('move.result', {
-        roomId: identity.id, moveId: move.transactionId, accepted,
+        roomId: identity.id, moveId: move.transactionId, reservationToken: move.reservationToken,
+        phase: 'source_ack', accepted, sessionId: move.sessionId,
         movedPlayerIds: accepted ? [move.playerUuid] : [],
         failedPlayerIds: accepted ? [] : [move.playerUuid],
         reason: accepted ? undefined : `client_move_result_${move.result}`
@@ -89,15 +61,15 @@ export function createRoomApplication ({ config, logger, metrics, onFatalError }
     }
   })
   const playerLifecycle = createPlayerLifecycle({
-    identity, publish, audience: audienceService, sessions, transport, broadcaster, moveService, reservations
+    identity, publish, sessions, players, levelService, transport, broadcaster, moveService, reservations, metrics, logger
   })
+  moveService.finalizeSession = playerLifecycle.finalizeSession
   const joinService = new JoinService({
     players, levels, levelService, broadcaster, logger, metrics, migration: migrationRosters,
     onPlayerJoined: playerLifecycle.joined, onEvict: playerLifecycle.evicted
   })
   const gameMessageService = new GameMessageService({
-    players, levels, broadcaster, logger, stateDecode: room.playerStateDecode, packetDebug,
-    onAudienceState: sample => audienceReactionService.collect(sample)
+    players, levels, broadcaster, logger, stateDecode: room.playerStateDecode, packetDebug
   })
   const authorityElectionGate = new AuthorityElectionGate()
   levels.onAuthorityElected((levelId, authority, targetPlayer) => {
@@ -109,34 +81,23 @@ export function createRoomApplication ({ config, logger, metrics, onFatalError }
     }
   })
   const dispatcher = new PacketDispatcher({ context: Object.freeze({
-    joinService, levelService, gameMessageService, audienceService, moveService,
-    broadcaster, logger, clock: () => Date.now() / 1000, transport
+    joinService, levelService, gameMessageService, moveService,
+    broadcaster, logger, clock: () => Date.now() / 1000, transport,
+    finalizeSession: playerLifecycle.finalizeSession
   }) })
   registerAllHandlers(dispatcher)
   const peerHandler = new PeerEventHandler({
     config: room, sessions, codec, dispatcher, players, levelService, moveService,
-    audienceService, broadcaster, transport, metrics, logger, packetDebug,
-    onPlayerLeft: playerLifecycle.notifyLeft
+    broadcaster, transport, metrics, logger, packetDebug,
+    onPlayerLeft: playerLifecycle.notifyLeft, finalizeSession: playerLifecycle.finalizeSession
   })
   const commands = Object.freeze({
     identity, players, reservations, telemetry, migrationRosters, moveService,
-    audienceService, performanceAuthority, liveBroadcastService,
-    audienceReactionService, audienceChatGlobalService,
     qwd: { publish }
   })
-  const disconnected = () => {
-    reservations.transportDropped()
-    audienceReactionService.disconnected()
-    for (const [name, service] of [
-      ['global chat', audienceChatGlobalService], ['live broadcast', liveBroadcastService], ['performance', performanceAuthority]
-    ]) {
-      service.enqueue(() => service.disconnected())
-        .catch(error => logger.warn({ err: error }, `${name} disconnect cleanup failed`))
-    }
-  }
   qwd = new QwdClient({
     url: config.qwd.url, room, identity, logger,
-    snapshot: () => ({ players: players.size, version: telemetry.version, capacity: ROOM_CAPACITY }),
+    snapshot: () => ({ players: players.size, ...reservations.facts(telemetry.version) }),
     onCommand: command => {
       packetDebug.logChannel('qwdCommand', { cmd: command?.cmd, roomId: command?.data?.roomId }, 'qwd command')
       reservations.expire()
@@ -150,20 +111,16 @@ export function createRoomApplication ({ config, logger, metrics, onFatalError }
     onConnected: () => {
       logger.info({ roomId: identity.id, players: players.size }, 'qwd connected; forcing full telemetry resync')
       telemetry.forceFull()
-      performanceAuthority.connected()
-      liveBroadcastService.connected()
     },
-    onTransportDropped: disconnected
+    onTransportDropped: () => reservations.transportDropped()
   })
   const tick = new RoomTick({
-    players, sessions, metrics, gameMessageService, moveService, audienceService,
-    performanceAuthority, liveBroadcastService, audienceReactionService,
-    audienceChatGlobalService, reservations, migrationRosters, telemetry, logger
+    players, sessions, metrics, gameMessageService, moveService,
+    reservations, migrationRosters, telemetry
   })
   const tickLoop = new TickLoop({ tickRate: room.tickRate, onTick: () => tick.tick(), logger })
   return new RoomServer({
-    identity, transport, qwd, tickLoop, tick, peerHandler, performanceAuthority,
-    liveBroadcastService, audienceReactionService, audienceChatGlobalService,
+    identity, transport, qwd, tickLoop, tick, peerHandler,
     sessions, players, reservations, migrationRosters, logger, onFatalError
   })
 }

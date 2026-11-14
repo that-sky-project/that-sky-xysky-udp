@@ -7,19 +7,13 @@ export class RoomServer {
   #listeners
 
   constructor ({ identity, transport, qwd, tickLoop, tick, peerHandler,
-    performanceAuthority, liveBroadcastService, audienceReactionService,
-    audienceChatGlobalService, sessions, players, reservations, migrationRosters,
-    logger, onFatalError }) {
+    sessions, players, reservations, migrationRosters, logger, onFatalError }) {
     this.identity = identity
     this.transport = transport
     this.qwd = qwd
     this.tickLoop = tickLoop
     this.tick = tick
     this.peerHandler = peerHandler
-    this.performanceAuthority = performanceAuthority
-    this.liveBroadcastService = liveBroadcastService
-    this.audienceReactionService = audienceReactionService
-    this.audienceChatGlobalService = audienceChatGlobalService
     this.sessions = sessions
     this.players = players
     this.reservations = reservations
@@ -93,10 +87,6 @@ export class RoomServer {
       await attempt(() => this.tickLoop.stop())
       await attempt(() => this.tick.stop())
       await attempt(() => qwdStopped)
-      await attempt(() => this.audienceChatGlobalService.stop())
-      await attempt(() => this.audienceReactionService.enqueue(() => this.audienceReactionService.disconnected()))
-      await attempt(() => this.liveBroadcastService.enqueue(() => this.liveBroadcastService.disconnected()))
-      await attempt(() => this.performanceAuthority.enqueue(() => this.performanceAuthority.disconnected()))
       // Reuse normal disconnect ownership; never duplicate PlayerLeft broadcasts
       // or domain removal in composition. Fallback ensures failed handlers cannot
       // leave sessions/player indexes alive after shutdown.

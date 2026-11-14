@@ -1,327 +1,170 @@
 import { PacketIds } from '../../protocol/PacketIds.js';
 import { ConnectionState } from '../../connection/states.js';
+import { sendPacket } from '../broadcast/sendPacket.js';
 
-/**
- * Completed moves kept for diagnostics.
- *
- * `moveHistory` exists only for `listHistory`, which no production path reads,
- * so it is a bounded ring: an unbounded Map here leaked one entry per migration
- * for the lifetime of the process.
- */
 const MOVE_HISTORY_LIMIT = 200;
-const MOVE_HISTORY_TTL_MS = 10 * 60 * 1000;
 
 export class MoveService {
-  constructor({ players, rooms, broadcaster, transport, levelService, logger, onMoveResult, moveTimeoutMs = 20000 }) {
-    this.players = players;
-    this.rooms = rooms;
-    this.broadcaster = broadcaster;
-    this.transport = transport;
-    this.levelService = levelService;
-    this.logger = logger;
-    this.onMoveResult = onMoveResult;
-    this.moveTimeoutMs = moveTimeoutMs;
+  constructor({ players, rooms, broadcaster, transport, levelService, logger, onMoveResult, finalizeSession, moveTimeoutMs = 20000 }) {
+    Object.assign(this, { players, rooms, broadcaster, transport, levelService, logger, onMoveResult, finalizeSession, moveTimeoutMs });
     this.pendingMoves = new Map();
     this.moveHistory = new Map();
   }
 
   recordHistory(moveId, entry) {
     this.moveHistory.set(moveId, entry);
-    if (this.moveHistory.size <= MOVE_HISTORY_LIMIT) return;
-
-    const cutoff = Date.now() - MOVE_HISTORY_TTL_MS;
-    for (const [id, move] of this.moveHistory) {
-      if (this.moveHistory.size <= MOVE_HISTORY_LIMIT) break;
-      const at = move.abortedAt ?? move.cancelledAt ?? move.acknowledgedAt ?? move.createdAt ?? 0;
-      if (at >= cutoff && this.moveHistory.size <= MOVE_HISTORY_LIMIT) break;
-      this.moveHistory.delete(id);
-    }
-    while (this.moveHistory.size > MOVE_HISTORY_LIMIT) {
-      const oldest = this.moveHistory.keys().next();
-      if (oldest.done) break;
-      this.moveHistory.delete(oldest.value);
-    }
+    while (this.moveHistory.size > MOVE_HISTORY_LIMIT) this.moveHistory.delete(this.moveHistory.keys().next().value);
   }
 
-  movePlayer(player, targetRoom, { disconnect = true } = {}) {
-    if (!player || !targetRoom || !player.session?.isActive?.() || this.findPendingByPlayer(player.id)) {
-      return false;
-    }
-
-    const moveId = this.createMoveId(player, targetRoom);
-    const moveNonce = this.createMoveNonce(player, targetRoom);
-    this.pendingMoves.set(moveId, {
-      moveId,
-      playerId: player.id,
-      playerUuid: player.uuid?.toString?.(),
-      playerLevelId: player.levelId,
-      targetRoomId: targetRoom.id,
-      targetAddress: targetRoom.address?.toApi?.() ?? targetRoom.address,
-      moveNonce,
-      splitType: 0,
-      status: 'pending',
-      createdAt: Date.now()
-    });
-
-    try {
-      this.broadcaster.send(player.session, {
-        id: PacketIds.MoveGame,
-        payload: {
-          address: targetRoom.address,
-          players: [player],
-          moveNonce,
-          splitType: 0,
-          isSplit: false,
-          destinationUuid: targetRoom.uuid
-        }
-      });
-    } catch (error) {
-      this.pendingMoves.delete(moveId);
-      throw error;
-    }
-    player.session.transition(ConnectionState.MOVING);
-    this.levelService?.releaseAuthority(player, 'player_moving');
-
-    this.logger.info({
-      playerId: player.id,
-      targetRoomId: targetRoom.id,
-      target: targetRoom.address.toApi()
-    }, 'player move requested');
-
-    // if (disconnect) {
-    //   this.transport.disconnect(player.session.peerId, 'later', 2);
-    //}
-    return true;
+  send(session, packet) {
+    return sendPacket(this.broadcaster, session, packet, undefined, 'Move packet send failed to queue');
   }
 
-  movePlayersAtomic(players, targetRoom, { disconnect = true, moveId } = {}) {
+  movePlayer(player, targetRoom, options = {}) {
+    return this.movePlayersAtomic([player], targetRoom, { ...options, isSplit: false }).accepted;
+  }
+
+  movePlayersAtomic(players, targetRoom, { moveId, reservationToken, isSplit = true } = {}) {
     const group = Array.isArray(players) ? players : [];
-    if (!group.length || !targetRoom) return { accepted: false, moved: 0, reason: 'empty_group' };
-    if (group.length > 7) return { accepted: false, moved: 0, reason: 'move_group_too_large' };
-    const unique = [...new Set(group)];
-    if (unique.length !== group.length) return { accepted: false, moved: 0, reason: 'duplicate_players' };
-    const eligible = unique.filter(player => player?.session?.isActive?.() && !this.findPendingByPlayer(player.id));
-    if (!eligible.length) return { accepted: false, moved: 0, reason: 'group_not_movable' };
-    const rejected = unique.filter(player => !eligible.includes(player));
-    const moved = [];
-    const failed = [...rejected];
-    const groupPlayers = eligible;
-    const prepared = [];
+    const rejected = reason => ({ accepted: false, moved: 0, reason,
+      failedPlayerIds: group.map(player => player?.uuid?.toString?.()).filter(Boolean) });
+    if (!group.length || !targetRoom) return rejected('empty_group');
+    if (group.length > 7) return rejected('move_group_too_large');
+    if (new Set(group).size !== group.length) return rejected('duplicate_players');
+    if (group.some(player => !player?.session?.isActive?.() || this.players.getBySession(player.session) !== player ||
+      this.findPendingByPlayer(player.id, player.session.id))) return rejected('group_not_movable');
+
+    const prepared = group.map(player => this.prepareMove(player, targetRoom, moveId, reservationToken));
+    const queued = [];
+    for (const pending of prepared) this.pendingMoves.set(pending.moveId, pending);
     try {
-      for (const player of eligible) {
-        const pending = this.prepareMove(player, targetRoom, moveId);
-        this.pendingMoves.set(pending.moveId, pending);
-        prepared.push(pending);
-      }
-  
-      for (const player of eligible) {
-        const pending = prepared.find(item => item.playerId === player.id);
-        if (!pending) continue;
-        this.broadcaster.send(player.session, {
-          id: PacketIds.MoveGame,
-          payload: {
-            address: targetRoom.address,
-            players: groupPlayers,
-            moveNonce: pending.moveNonce,
-            splitType: 0,
-            isSplit: true,
-            destinationUuid: targetRoom.uuid
-          }
-        });
-        moved.push(player);
+      for (let index = 0; index < group.length; index++) {
+        const player = group[index];
+        this.send(player.session, { id: PacketIds.MoveGame, payload: { address: targetRoom.address,
+          players: group, moveNonce: prepared[index].moveNonce, splitType: 0, isSplit, destinationUuid: targetRoom.uuid } });
+        queued.push(player);
       }
     } catch (error) {
       for (const pending of prepared) {
         this.pendingMoves.delete(pending.moveId);
-        this.recordHistory(pending.moveId, {
-          ...pending,
-          status: 'cancelled',
-          cancelReason: 2,
-          cancelledAt: Date.now(),
-          error: error.message
-        });
+        this.recordHistory(pending.moveId, { ...pending, status: 'cancelled', cancelReason: 2, cancelledAt: Date.now(), error: error.message });
       }
-      for (const player of moved) {
-        try {
-          this.broadcaster.send(player.session, { id: PacketIds.CancelMove, payload: { reason: 2 } });
-        } catch {
-          // The original MoveGame may already have closed the peer.
-        }
+      for (const player of queued) {
+        try { this.send(player.session, { id: PacketIds.CancelMove, payload: { reason: 2 } }); }
+        catch { this.finalizeSession?.(player.session, 'move_rollback_failed', { disconnect: 'now' }); }
       }
-      return { accepted: false, moved: 0, failedPlayerIds: eligible.map(player => player.uuid?.toString?.()).filter(Boolean), reason: error.message };
+      return rejected(error.message);
     }
-    for (const player of moved) {
-      player.session.transition(ConnectionState.MOVING);
-      this.levelService?.releaseAuthority(player, 'players_moving');
-    }
-
-    this.logger.info({ moveId, playerIds: moved.map(player => player.id), targetRoomId: targetRoom.id }, 'atomic player move committed');
-    return { accepted: moved.length > 0, moved: moved.length, failedPlayerIds: failed.map(player => player.uuid?.toString?.()).filter(Boolean), movedPlayerIds: moved.map(player => player.uuid?.toString?.()).filter(Boolean) };
+    for (const player of group) player.session.transition(ConnectionState.MOVING);
+    // All peers are in MOVING before elections can see the remaining active set.
+    for (const player of group) this.levelService?.releaseAuthority(player, 'players_moving');
+    this.logger.info({ moveId, playerIds: group.map(player => player.id), targetRoomId: targetRoom.id }, 'atomic player move committed');
+    return { accepted: true, moved: group.length, movedPlayerIds: group.map(player => player.uuid.toString()), failedPlayerIds: [] };
   }
 
-  prepareMove(player, targetRoom, moveId) {
-    const generatedMoveId = moveId
-      ? `${moveId}:${player.id}`
-      : this.createMoveId(player, targetRoom);
-    return {
-      moveId: generatedMoveId,
-      transactionId: moveId,
-      playerId: player.id,
-      playerUuid: player.uuid?.toString?.(),
-      playerLevelId: player.levelId,
-      targetRoomId: targetRoom.id,
-      targetAddress: targetRoom.address?.toApi?.() ?? targetRoom.address,
-      moveNonce: this.createMoveNonce(player, targetRoom),
-      splitType: 0,
-      status: 'pending',
-      createdAt: Date.now()
-    };
+  prepareMove(player, targetRoom, moveId, reservationToken) {
+    const createdAt = Date.now();
+    return { moveId: moveId ? `${moveId}:${player.id}` : this.createMoveId(player, targetRoom),
+      transactionId: moveId, reservationToken, playerId: player.id, playerUuid: player.uuid.toString(),
+      sessionId: player.session.id, playerLevelId: player.levelId, lvSeq: player.lvSeq,
+      targetRoomId: targetRoom.id, targetAddress: targetRoom.address?.toApi?.() ?? targetRoom.address,
+      moveNonce: this.createMoveNonce(player, targetRoom), splitType: 0, status: 'pending', createdAt,
+      cleanupAt: createdAt + this.moveTimeoutMs };
   }
 
   moveLevel(levelId, targetRoom) {
-    const players = typeof this.players.listActiveInLevel === 'function'
-      ? this.players.listActiveInLevel(Number(levelId))
-      : this.players.listInLevel(Number(levelId));
-    let moved = 0;
-
-    for (const player of players) {
-      if (this.movePlayer(player, targetRoom)) {
-        moved += 1;
-      }
-    }
-
-    return moved;
+    const players = this.players.listActiveInLevel?.(Number(levelId)) ?? this.players.listInLevel(Number(levelId));
+    return this.movePlayersAtomic(players, targetRoom).moved;
   }
 
   cancelPlayerMove(player, reason = 0) {
-    if (!player) {
-      return false;
-    }
-
-    this.broadcaster.send(player.session, {
-      id: PacketIds.CancelMove,
-      payload: {
-        reason
-      }
-    });
+    if (!player || this.players.getBySession(player.session) !== player) return false;
+    const pending = this.findPendingByPlayer(player.id, player.session.id);
+    if (!pending) return false;
+    this.send(player.session, { id: PacketIds.CancelMove, payload: { reason } });
+    this.pendingMoves.delete(pending.moveId);
+    this.recordHistory(pending.moveId, { ...pending, status: 'cancelled', cancelReason: reason, cancelledAt: Date.now() });
     if (player.session.state === ConnectionState.MOVING) {
       player.session.transition(ConnectionState.ACTIVE);
       this.levelService?.rebalanceAuthority(player.levelId);
     }
-
-    for (const [moveId, move] of this.pendingMoves.entries()) {
-      if (move.playerId === player.id) {
-        const updated = {
-          ...move,
-          status: 'cancelled',
-          cancelReason: reason,
-          cancelledAt: Date.now()
-        };
-        this.pendingMoves.delete(moveId);
-        this.recordHistory(moveId, updated);
-      }
-    }
-
     return true;
   }
 
   handleMoveResult(session, payload) {
     const player = this.players.getBySession(session);
-    if (!player) {
-      return;
-    }
-
+    if (!player || player.session !== session) return;
+    const matched = this.findPendingByPlayer(player.id, session.id);
+    if (!matched || matched.status !== 'pending') return;
     const result = payload?.result ?? payload?.payloadBytes?.[0] ?? 0;
-    const matched = this.findPendingByPlayer(player.id);
-    if (matched) {
-      const updated = {
-        ...matched,
-        status: result === 0 ? 'acknowledged' : 'failed',
-        result,
-        acknowledgedAt: Date.now()
-      };
+    const updated = { ...matched, status: result === 0 ? 'acknowledged' : 'failed', result, acknowledgedAt: Date.now() };
+    if (result === 0) {
+      // This acknowledges receipt at the source, not admission at the destination.
+      // Keep the original cleanup deadline even when no disconnect event follows.
+      this.pendingMoves.set(matched.moveId, updated);
+    } else {
       this.pendingMoves.delete(matched.moveId);
-      this.recordHistory(matched.moveId, updated);
-      if (result !== 0 && session.state === ConnectionState.MOVING) {
+      if (session.state === ConnectionState.MOVING) {
         session.transition(ConnectionState.ACTIVE);
         this.levelService?.rebalanceAuthority(player.levelId);
       }
-      this.onMoveResult?.({ ...matched, result }, result === 0);
     }
-
-    this.logger.debug({
-      playerId: player.id,
-      result,
-      payloadBytes: payload.payloadBytes?.length ?? 0
-    }, 'received move result');
+    this.recordHistory(matched.moveId, updated);
+    this.onMoveResult?.({ ...updated, phase: 'source_ack' }, result === 0);
+    this.logger.debug({ playerId: player.id, sessionId: session.id, result }, 'received source move result');
   }
 
   expireStuckMoves(now = Date.now()) {
     let expired = 0;
     for (const move of [...this.pendingMoves.values()]) {
-      if (move.status !== 'pending' || now - move.createdAt < this.moveTimeoutMs) continue;
-      const player = this.players.list().find(item => item.id === move.playerId);
+      if (now < move.cleanupAt) continue;
+      const candidate = this.players.getById(move.playerId);
+      const player = candidate?.session.id === move.sessionId && candidate.uuid.toString() === move.playerUuid ? candidate : undefined;
+      this.pendingMoves.delete(move.moveId);
+      this.recordHistory(move.moveId, { ...move, status: 'aborted', abortReason: 'move_timeout', abortedAt: now });
       if (player) {
-        if (move.transactionId) {
-          this.pendingMoves.delete(move.moveId);
-          this.recordHistory(move.moveId, { ...move, status: 'aborted', abortReason: 'move_timeout', abortedAt: now });
-          this.logger.warn({ moveId: move.moveId, playerId: move.playerId }, 'qwd move timed out; disconnecting lingering source session');
+        if (!move.transactionId && move.status === 'pending') {
           try {
-            this.transport.disconnect(player.session.peerId, 'now');
-          } catch (error) {
-            this.logger.warn({ err: error, moveId: move.moveId, playerId: move.playerId }, 'failed to disconnect lingering source session');
-          }
-        } else {
-          this.cancelPlayerMove(player, 2);
-          this.logger.warn({ moveId: move.moveId, playerId: move.playerId }, 'move timed out; reverted session to active');
-        }
-      } else {
-        this.pendingMoves.delete(move.moveId);
-        this.recordHistory(move.moveId, { ...move, status: 'aborted', abortReason: 'move_timeout', abortedAt: now });
+            this.send(player.session, { id: PacketIds.CancelMove, payload: { reason: 2 } });
+            player.session.transition(ConnectionState.ACTIVE);
+            this.levelService?.rebalanceAuthority(player.levelId);
+          } catch { this.finalizeSource(player, 'move_timeout'); }
+        } else this.finalizeSource(player, 'move_timeout');
       }
-      expired += 1;
+      expired++;
     }
     return expired;
   }
 
-  forgetPlayerMoves(player, reason = 'player_disconnected') {    if (!player) return 0;
+  finalizeSource(player, reason) {
+    if (this.finalizeSession) return this.finalizeSession(player.session, reason, { disconnect: 'now' });
+    // Standalone service owners still cannot leave a domain ghost after native now.
+    this.players.removeBySession(player.session);
+    player.session.close?.();
+    this.levelService?.releaseAuthority(player, reason);
+    this.transport.disconnect(player.session.peerId, 'now');
+  }
+
+  forgetPlayerMoves(player, reason = 'player_disconnected') {
+    if (!player) return 0;
     let removed = 0;
-    for (const [moveId, move] of this.pendingMoves.entries()) {
-      if (move.playerId !== player.id) continue;
+    for (const [moveId, move] of this.pendingMoves) {
+      if (move.playerId !== player.id || move.sessionId !== player.session.id) continue;
       this.pendingMoves.delete(moveId);
-      this.recordHistory(moveId, {
-        ...move,
-        status: 'aborted',
-        abortReason: reason,
-        abortedAt: Date.now()
-      });
-      removed += 1;
+      this.recordHistory(moveId, { ...move, status: 'aborted', abortReason: reason, abortedAt: Date.now() });
+      removed++;
     }
     return removed;
   }
 
-  createMoveId(player, targetRoom) {
-    return `${player.id}:${targetRoom.id}:${Date.now()}`;
-  }
-
-  listPending() {
-    return Array.from(this.pendingMoves.values());
-  }
-
-  listHistory() {
-    return Array.from(this.moveHistory.values());
-  }
-
-  findPendingByPlayer(playerId) {
+  createMoveId(player, targetRoom) { return `${player.id}:${targetRoom.id}:${Date.now()}`; }
+  listPending() { return Array.from(this.pendingMoves.values()); }
+  listHistory() { return Array.from(this.moveHistory.values()); }
+  findPendingByPlayer(playerId, sessionId) {
     for (const move of this.pendingMoves.values()) {
-      if (move.playerId === playerId && move.status === 'pending') {
-        return move;
-      }
+      if (move.playerId === playerId && (sessionId === undefined || move.sessionId === sessionId)) return move;
     }
-
-    return undefined;
   }
-
   createMoveNonce(player, targetRoom) {
     const high = BigInt(player.id & 0xff);
     const low = BigInt((targetRoom.id?.toString?.().length ?? 0) & 0xff);

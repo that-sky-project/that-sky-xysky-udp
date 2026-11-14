@@ -12,14 +12,10 @@ function fixture() {
   transport.start = async () => order.push('transport start');
   transport.stop = async () => order.push('transport stop');
   const qwd = { start: () => order.push('qwd start'), stop: () => order.push('qwd stop') };
-  const lane = name => ({ enqueue: fn => Promise.resolve().then(fn), disconnected: () => order.push(name) });
   const app = new RoomServer({
     identity: { id: 'room-id' }, transport, qwd, logger,
     tickLoop: { start: () => order.push('tick start'), stop: () => order.push('tick stop') },
     tick: { stop: () => order.push('lanes stop') },
-    audienceChatGlobalService: { stop: () => order.push('chat stop') },
-    audienceReactionService: lane('reactions stop'),
-    liveBroadcastService: lane('live stop'), performanceAuthority: lane('performance stop'),
     peerHandler: { onConnect() {}, onMessage() {}, onDisconnect: () => order.push('peer cleanup') },
     sessions: { list: () => [{ peerId: 1 }], remove: () => order.push('session cleanup') },
     players: { removeBySession: () => order.push('player cleanup') },
@@ -47,7 +43,7 @@ test('room starts listening before registration, shared lifecycle tasks do not d
 test('room shutdown aggregates failures but still releases transport and all state', async () => {
   const { app, transport, order } = fixture();
   await app.start();
-  app.audienceChatGlobalService.stop = () => { throw new Error('chat error'); };
+  app.tick.stop = () => { throw new Error('tick error'); };
   await assert.rejects(app.stop(), AggregateError);
   assert.ok(order.includes('session cleanup'));
   assert.ok(order.includes('rosters cleanup'));

@@ -94,7 +94,7 @@ test('real RW owns reconnects, preserves endpoint policy, resyncs and disables i
   assert.deepEqual(socket.sent.map(m => m.event), ['node.ready', 'room.created'])
   assert.equal(socket.sent[1].data.roomId, '12345678')
   assert.equal(socket.sent[1].data.port, 1234)
-  assert.deepEqual(qwd.occupancy(), { capacity: 10, load: 0.3 })
+  assert.deepEqual(qwd.occupancy(), { capacity: 10, physicalPlayers: 3, activePlayers: 3, reservedSlots: 0, version: 2, load: 0.3 })
   const rw = qwd.socket, epoch = qwd.connectionEpoch
   socket.terminate()
   qwd.socket.send('must-not-be-buffered')
@@ -107,7 +107,7 @@ test('real RW owns reconnects, preserves endpoint policy, resyncs and disables i
   assert.equal(qwd.queue.length, 0)
 })
 
-test('offline structured telemetry coalesces, snapshots caller data, controls reject, queue overflow logs', t => {
+test('offline structured telemetry coalesces, snapshots caller data and queue overflow logs', t => {
   const warnings = []
   const { qwd } = fixture(t, { logger: { ...log, warn: (...args) => warnings.push(args) } })
   const players = [{ playerId: 'first' }]
@@ -119,7 +119,6 @@ test('offline structured telemetry coalesces, snapshots caller data, controls re
   assert.equal(qwd.queue[0].event, 'room.telemetry')
   assert.equal(qwd.queue[0].data.seq, 2)
   assert.equal(qwd.queue[0].data.kind, 'delta')
-  for (const event of ['performance.request', 'performance.sync', 'liveBroadcast.publish', 'liveBroadcast.sync', 'audience.reaction']) assert.equal(qwd.publish(event, {}), false)
   for (let i = 0; i < 255; i++) assert.equal(qwd.publish('room.test', { i }), true)
   assert.equal(qwd.publish('room.overflow', {}), false)
   assert.equal(qwd.queue.length, 256)
@@ -231,7 +230,7 @@ test('native send throw and synchronous callback errors return false and hard te
     qwd.start(); const socket = await open()
     socket[kind] = kind === 'sendError' ? new Error('callback failure') : true
     socket.hangClose = true
-    assert.equal(qwd.publish('performance.publish', {}), false)
+    assert.equal(qwd.publish('player.join', {}), false)
     assert.equal(socket.terminated, true)
     assert.equal(qwd.connected, false)
     qwd.stop()
@@ -242,7 +241,7 @@ test('async native callback failure drops epoch, late callbacks cannot kill repl
   const { qwd, open } = fixture(t)
   qwd.start(); const socket = await open()
   socket.asyncSend = true
-  assert.equal(qwd.publish('performance.publish', {}), true)
+  assert.equal(qwd.publish('player.join', {}), true)
   const lateCallback = socket.pendingCallback
   lateCallback(new Error('late send failed'))
   assert(socket.terminated)
@@ -255,11 +254,11 @@ test('async native callback failure drops epoch, late callbacks cannot kill repl
 test('native rejection and byte-based backpressure preserve false result, ACK pressure terminates', async t => {
   const { qwd, open } = fixture(t)
   qwd.start(); const socket = await open()
-  const messageBytes = Buffer.byteLength(JSON.stringify({ v: 1, event: 'performance.publish', data: { text: '原' } }))
+  const messageBytes = Buffer.byteLength(JSON.stringify({ v: 1, event: 'player.join', data: { text: '原' } }))
   socket.bufferedAmount = qwd.backpressureLimitBytes - messageBytes
-  assert.equal(qwd.publish('performance.publish', { text: '原' }), true)
+  assert.equal(qwd.publish('player.join', { text: '原' }), true)
   socket.bufferedAmount++
-  assert.equal(qwd.publish('performance.publish', { text: '原' }), false)
+  assert.equal(qwd.publish('player.join', { text: '原' }), false)
   assert.equal(qwd.queue.length, 0)
   socket.bufferedAmount = qwd.backpressureLimitBytes
   assert.equal(qwd.sendAck(0, 0, {}), false)
@@ -349,4 +348,66 @@ test('stop drains retired-epoch callbacks too and blocks restart until draining 
   assert.equal(qwd.pendingCommandTasks.size, 0)
   qwd.start(); await open(3)
   assert.equal(qwd.connected, true)
+})
+
+// Generic QWD transport regressions retained from the removed feature suite.
+class Socket extends EventEmitter {
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
+  constructor () { super(); this.readyState = 0; this.bufferedAmount = 0; this.sent = []; this.terminated = false; this.listeners = new Map() }
+  addEventListener (type, listener) {
+    const wrapper = (...args) => listener(type === 'message' ? { type, data: args[0] } : type === 'close' ? { type, code: args[0], reason: args[1]?.toString() } : { type, error: args[0] })
+    this.listeners.set(listener, wrapper); this.on(type, wrapper)
+  }
+  removeEventListener (type, listener) { this.off(type, this.listeners.get(listener)); this.listeners.delete(listener) }
+  send (text, callback) { if (this.fail) throw new Error('send failed'); this.sent.push(JSON.parse(text)); callback?.() }
+  terminate () { this.terminated = true; this.readyState = 3; this.emit('close', 1006, Buffer.alloc(0)) }
+  close () { this.readyState = 3; this.emit('close', 1000, Buffer.alloc(0)) }
+  ping () {}
+  open () { this.readyState = 1; this.emit('open') }
+}
+async function client (onCommand = () => ({ code: 0 })) {
+  const { createWebSocketImpl } = await import('../src/qwd/WebSocketAdapter.js')
+  const sockets = []
+  class NativeSocket extends Socket { constructor (...args) { super(...args); sockets.push(this) } }
+  const qwd = new QwdClient({ url: 'ws://fake.invalid', room: {}, identity: { id: 'A' }, logger: log, onCommand,
+    websocketImpl: createWebSocketImpl({ WebSocket: NativeSocket, reconnectOptions: { minReconnectionDelay: 1, maxReconnectionDelay: 1 } }) })
+  qwd.startLivenessWatch = () => {}
+  qwd.start()
+  const nextSocket = async count => {
+    for (let i = 0; i < 100 && sockets.length < count; i++) await new Promise(resolve => setTimeout(resolve, 2))
+    assert.equal(sockets.length, count)
+    sockets[count - 1].open()
+    return sockets[count - 1]
+  }
+  await nextSocket(1)
+  return { qwd, sockets, nextSocket }
+}
+const command = (socket, id, cmd = 'room.reserve', data = {}) => socket.emit('message', Buffer.from(JSON.stringify({ v: 1, id, cmd, data })))
+
+test('connection commands deduplicate, reject collisions, isolate queued old socket and ACK destination', async t => {
+  const calls = []; const { qwd, sockets, nextSocket } = await client(c => { calls.push(c.id); return { code: 0 } })
+  t.after(() => qwd.stop())
+  const rw = qwd.socket
+  command(sockets[0], 1); command(sockets[0], 1); await qwd.commandChain
+  assert.deepEqual(calls, [1]); assert.equal(sockets[0].sent.filter(s => s.id === 1).length, 2)
+  command(sockets[0], 1, 'move.cancel'); await qwd.commandChain
+  assert.notEqual(sockets[0].sent.at(-1).code, 0)
+  command(sockets[0], 2); sockets[0].terminate(); await nextSocket(2)
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(calls, [1])
+  assert.equal(qwd.socket, rw, 'RW instance persists across native reconnects')
+  assert(!sockets[1].sent.some(s => s.id === 2))
+  command(sockets[1], 1); await qwd.commandChain; assert.deepEqual(calls, [1, 1])
+})
+
+test('extracted transport backpressure and ACK send failures close native socket; ordinary events queue offline', async t => {
+  const { qwd, sockets } = await client(); const socket = sockets[0]
+  t.after(() => qwd.stop())
+  socket.bufferedAmount = qwd.backpressureLimitBytes
+  assert.equal(qwd.publish('player.join', {}), false); assert.equal(qwd.queue.length, 0)
+  socket.bufferedAmount = 0; assert.equal(qwd.publish('room.telemetry', {}), true)
+  socket.fail = true; assert.equal(qwd.sendAck(5, 0, {}), false); assert.equal(socket.terminated, true)
+  assert.equal(qwd.publish('player.join', {}), true); assert.equal(qwd.queue.length, 1)
 })

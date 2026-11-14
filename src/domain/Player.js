@@ -41,6 +41,8 @@ export class Player {
   toApi() {
     return {
       id: this.id,
+      sessionId: this.session.id,
+      lvSeq: this.lvSeq,
       roomId: this.session.roomId,
       uuid: this.uuid.toString(),
       peerId: this.session.peerId.toString(),
