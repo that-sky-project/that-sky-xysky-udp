@@ -52,8 +52,6 @@ export class GameMessageService {
       // Degrade to the head read instead of dropping the whole frame.
       const layout = player.lastStateLayout ?? 'u64-full';
       const lite = decodePlayerStateLite(data, { layout });
-      lite.degraded = true;
-      lite.decodeError = error;
       // Field-level detail (field/min/max/encoded/bitOffset) is what makes the
       // next occurrence actionable: widen the named bound, redeploy, converge.
       // The full hex dumps once per distinct failure signature so the exact
