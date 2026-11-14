@@ -41,7 +41,23 @@ export class GameMessageService {
     if (this.stateDecode === 'basic' && player.lastStateLayout) {
       return decodePlayerStateLite(data, { layout: player.lastStateLayout });
     }
-    return decodePlayerState(data, { preferredLayout: player.lastStateLayout });
+    try {
+      return decodePlayerState(data, { preferredLayout: player.lastStateLayout });
+    } catch (error) {
+      // The 0.35.1 tail schema still has a gap: the best layout walks to
+      // within 31 bits of the end and underflows, so full decodes of states
+      // that fill the tail throw even though position and velocity — what
+      // seats, telemetry and migration actually consume — sit in the
+      // layout-independent head (before the first layout-gated field).
+      // Degrade to the head read instead of dropping the whole frame.
+      const layout = player.lastStateLayout ?? 'u64-full';
+      const lite = decodePlayerStateLite(data, { layout });
+      lite.degraded = true;
+      lite.decodeError = error;
+      this.logger.debug?.({ playerId: player?.uuid?.toString?.(), layout,
+        consumedBits: error.consumedBits, err: error.message }, 'player state full decode failed; degraded to head read');
+      return lite;
+    }
   }
 
   reportDecodeFailure(playerId, decoded, payload, error) {

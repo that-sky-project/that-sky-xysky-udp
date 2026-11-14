@@ -106,16 +106,22 @@ export function decodePlayerState(buffer, { maxBytes = PLAYER_STATE_MAX_BYTES, m
       // A correct layout consumes the record to the last byte; anything left
       // over means the variant guessed a different field set and drifted.
       if (io.reader.remainingBits > 7) {
-        lastError = new ProtocolError('PlayerState layout left trailing data', {
+        const trailing = new ProtocolError('PlayerState layout left trailing data', {
           layout: candidate.id,
           remainingBits: io.reader.remainingBits
         });
+        trailing.consumedBits = io.bits;
+        if (!lastError || trailing.consumedBits >= (lastError.consumedBits ?? 0)) lastError = trailing;
         continue;
       }
       return { version: VERSION, layout: candidate.id, rawState, fields, complete: true, parsed: true,
         bits: io.bits, mode: io.mode, _originalFields: structuredClone(fields) };
     } catch (error) {
-      lastError = error;
+      // Surface the attempt that got furthest: the last candidate's error is
+      // arbitrary — it names the drift point of a doomed variant, while the
+      // furthest walk points at the real schema gap.
+      error.consumedBits = io.bits;
+      if (!lastError || error.consumedBits >= (lastError.consumedBits ?? 0)) lastError = error;
     }
   }
   throw lastError ?? new ProtocolError('PlayerState could not be decoded');
@@ -279,10 +285,11 @@ class NativeIo {
   }
   string(v = '', max = 64) {
     if (this.reader) {
+      const bitOffset = this.bits;
       const n = this.reader.readUInt32();
-      if (n < 1 || n > max) throw new ProtocolError('PlayerState string length out of range', { size: n, max });
+      if (n < 1 || n > max) throw new ProtocolError('PlayerState string length out of range', { size: n, max, scope: this.scopeName, bitOffset });
       const b = this.reader.readBytes(n);
-      if (b[n - 1] !== 0) throw new ProtocolError('PlayerState string is not NUL terminated');
+      if (b[n - 1] !== 0) throw new ProtocolError('PlayerState string is not NUL terminated', { scope: this.scopeName, bitOffset, size: n });
       return b.subarray(0, n - 1).toString('utf8');
     }
     const b = Buffer.concat([Buffer.from(String(v), 'utf8'), Buffer.from([0])]);
@@ -364,8 +371,12 @@ function playerState(io, v = {}) {
   o.offset_52c4 = io.u16(v.offset_52c4);
   o.offset_52cc = io.u8(v.offset_52cc);
   o.offset_52ce = io.u8(v.offset_52ce);
-  o.offset_52c6 = io.bounded(v.offset_52c6, 0, 0x2a3);
-  o.offset_52c8_2 = io.bounded(v.offset_52c8_2, 0, 0x2a3);
+  // Bounds widened 0x2a3 -> 0x3ff (2026-11-14): live 0.35.1 traffic on level
+  // 3526133726 carries 987 (0x3db) here, past the observed-session 675. Both
+  // bounds stay 10 bits wide (ceil(log2(max+1))), so the wire alignment is
+  // unchanged; 1023 is the full 10-bit range.
+  o.offset_52c6 = io.bounded(v.offset_52c6, 0, 0x3ff);
+  o.offset_52c8_2 = io.bounded(v.offset_52c8_2, 0, 0x3ff);
   o.offset_52cd = io.u8(v.offset_52cd);
   o.offset_52ca = io.bounded(v.offset_52ca, 0, 0x11);
   // Four independent bools. GetPlayerStateFromAvatar (0x140CA0090) shows the
@@ -378,9 +389,11 @@ function playerState(io, v = {}) {
   // state+0x5b30 goes through PlayerId::Serialize, so it is dynamically sized.
   o.offset_5b30 = io.dynU8(v.offset_5b30);
   o.offset_5bc2 = io.u8(v.offset_5bc2);
-  // state+0x5b5c / 0x5b60 are signed bounded (-1..16 and -1..8).
+  // state+0x5b5c / 0x5b60 are signed bounded (-1..16 and -1..8). 5b60 widened
+  // to -1..14 (2026-11-14): live 0.35.1 traffic carries 11 past the observed
+  // 8; both ends keep the 4-bit width (16 values), so alignment is unchanged.
   o.offset_5b5c = io.sbounded(v.offset_5b5c, -1, 0x10);
-  o.offset_5b60 = io.sbounded(v.offset_5b60, -1, 8);
+  o.offset_5b60 = io.sbounded(v.offset_5b60, -1, 0xe);
   // state+0x5baa bool, then 0x58a0 bool and six raw pose vec3s (0x58b0..0x5900).
   o.offset_5baa = io.bool(v.offset_5baa);
   o.offset_5890 = io.bool(v.offset_5890);
